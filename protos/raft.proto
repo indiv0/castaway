@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package castaway;
+
+// Raft service definition.
+service Raft {
+    // Send a ping
+    rpc SendPing (PingRequest) returns (PingReply) {}
+}
+
+// Request message containing the ping text.
+message PingRequest {
+    string message = 1;
+}
+
+// Response message containing the ping text.
+message PingReply {
+    string message = 1;
+}
