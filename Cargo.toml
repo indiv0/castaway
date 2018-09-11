@@ -4,4 +4,4 @@ version = "0.1.0"
 authors = ["Nikita Pekin <contact@nikitapek.in>"]
 
 [build-dependencies]
-protoc-rust = "*"
+protoc-rust = "2.0.4"
