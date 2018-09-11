@@ -3,4 +3,5 @@ name = "castaway"
 version = "0.1.0"
 authors = ["Nikita Pekin <contact@nikitapek.in>"]
 
-[dependencies]
+[build-dependencies]
+protoc-rust = "*"
