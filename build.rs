@@ -1,14 +1,11 @@
-extern crate protoc_rust;
-
-use protoc_rust::Customize;
+extern crate protoc_rust_grpc;
 
 fn main() {
-    protoc_rust::run(protoc_rust::Args {
+    protoc_rust_grpc::run(protoc_rust_grpc::Args {
         out_dir: "src/protos",
         input: &["protos/raft.proto"],
         includes: &["protos"],
-        customize: Customize {
-            ..Default::default()
-        },
-    }).expect("protoc");
+        rust_protobuf: true,
+        ..Default::default()
+    }).expect("protoc-rust-grpc");
 }

@@ -3,5 +3,10 @@ name = "castaway"
 version = "0.1.0"
 authors = ["Nikita Pekin <contact@nikitapek.in>"]
 
+[dependencies]
+grpc = "0.5.0"
+protobuf = "2.0.4"
+tls-api = "0.1.20"
+
 [build-dependencies]
-protoc-rust = "2.0.4"
+protoc-rust-grpc = "0.5.0"
