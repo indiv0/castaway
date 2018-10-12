@@ -11,6 +11,7 @@ use protos::raft::{PingRequest, PingReply};
 use protos::raft_grpc::{Raft, RaftServer};
 use tls_api::TlsAcceptorBuilder;
 
+mod raft;
 mod protos;
 
 const PORT: u16 = 50051;
