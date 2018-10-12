@@ -49,6 +49,13 @@ fn main() {
              .value_name("LISTEN_PORT")
              .help("Port to listen on")
              .takes_value(true))
+        .arg(Arg::with_name("server")
+             .short("s")
+             .long("server")
+             .value_name("SERVER")
+             .help("Address of other Raft server")
+             .takes_value(true)
+             .multiple(true))
         .get_matches();
 
     let tls = matches.is_present("tls");
@@ -56,6 +63,15 @@ fn main() {
         Some(port) => port.parse().unwrap(),
         None => if tls { PORT_TLS } else { PORT },
     };
+    let servers = match matches.values_of("server") {
+        Some(servers) => servers.collect::<Vec<_>>(),
+        None => panic!("specify one or more servers with --server"),
+    };
+
+    println!("raft servers in cluster:");
+    for server in servers {
+        println!("\t{}", server);
+    }
 
     let mut server = grpc::ServerBuilder::new();
     server.http.set_port(port);

@@ -7,11 +7,11 @@ services:
           - 58051:58051
         volumes:
           - .:/usr/src/castaway
-        command: target/debug/castaway --tls --port 58051
+        command: target/debug/castaway --tls --port 58051 --server localhost:58052
     castaway_2:
         build: .
         ports:
           - 58052:58052
         volumes:
           - .:/usr/src/castaway
-        command: target/debug/castaway --tls --port 58052
+        command: target/debug/castaway --tls --port 58052 --server localhost:58051
