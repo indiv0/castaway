@@ -1,10 +1,11 @@
+extern crate clap;
 extern crate futures;
 extern crate grpc;
 extern crate protobuf;
 extern crate tls_api;
 extern crate tls_api_native_tls;
 
-use std::env;
+use clap::{Arg, App};
 use std::thread;
 use protos::raft::{PingRequest, PingReply};
 use protos::raft_grpc::{Raft, RaftServer};
@@ -33,14 +34,28 @@ fn test_tls_acceptor() -> tls_api_native_tls::TlsAcceptor {
     builder.build().unwrap()
 }
 
-fn is_tls() -> bool {
-    env::args().any(|a| a == "--tls")
-}
-
 fn main() {
-    let tls = is_tls();
+    // clap-rs matches, used for argument parsing.
+    let matches = App::new("castaway")
+        .version("0.1")
+        .author("Nikita Pekin <npeki029@uottawa.ca>")
+        .about("Raft Server")
+        .arg(Arg::with_name("tls")
+             .long("tls")
+             .help("Initialize server with TLS enabled"))
+        .arg(Arg::with_name("port")
+             .short("p")
+             .long("port")
+             .value_name("LISTEN_PORT")
+             .help("Port to listen on")
+             .takes_value(true))
+        .get_matches();
 
-    let port = if tls { PORT_TLS } else { PORT };
+    let tls = matches.is_present("tls");
+    let port = match matches.value_of("port") {
+        Some(port) => port.parse().unwrap(),
+        None => if tls { PORT_TLS } else { PORT },
+    };
 
     let mut server = grpc::ServerBuilder::new();
     server.http.set_port(port);

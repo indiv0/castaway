@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Nikita Pekin <contact@nikitapek.in>"]
 
 [dependencies]
+clap = "2.32.0"
 futures = "0.1.25"
 grpc = "0.5.0"
 protobuf = "2.1.1"
