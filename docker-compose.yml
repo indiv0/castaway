@@ -1,0 +1,17 @@
+version: '3'
+
+services:
+    castaway_1:
+        build: .
+        ports:
+          - 58051:58051
+        volumes:
+          - .:/usr/src/castaway
+        command: target/debug/castaway --tls --port 58051
+    castaway_2:
+        build: .
+        ports:
+          - 58052:58052
+        volumes:
+          - .:/usr/src/castaway
+        command: target/debug/castaway --tls --port 58052

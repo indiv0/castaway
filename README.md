@@ -29,3 +29,7 @@ Run an instance of castaway:
 Run the docker container:
 
     docker run --rm castaway:latest
+
+To launch a cluster of containers locally:
+
+    docker-compose up --build
