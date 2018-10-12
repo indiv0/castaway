@@ -12,6 +12,9 @@ use tls_api::TlsAcceptorBuilder;
 
 mod protos;
 
+const PORT: u16 = 50051;
+const PORT_TLS: u16 = 50052;
+
 struct RaftImpl;
 
 impl Raft for RaftImpl {
@@ -37,7 +40,7 @@ fn is_tls() -> bool {
 fn main() {
     let tls = is_tls();
 
-    let port = if tls { 50052 } else { 50051 };
+    let port = if tls { PORT_TLS } else { PORT };
 
     let mut server = grpc::ServerBuilder::new();
     server.http.set_port(port);
