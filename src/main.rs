@@ -43,38 +43,47 @@ fn main() {
         .arg(Arg::with_name("tls")
              .long("tls")
              .help("Initialize server with TLS enabled"))
+        .arg(Arg::with_name("id")
+             .long("id")
+             .value_name("SERVER_ID")
+             .help("ID of this Raft server")
+             .takes_value(true)
+             .required(true))
+        .arg(Arg::with_name("address")
+             .short("a")
+             .long("address")
+             .value_name("LISTEN_ADDRESS")
+             .help("Address to listen on")
+             .takes_value(true)
+             .required(true))
         .arg(Arg::with_name("port")
              .short("p")
              .long("port")
              .value_name("LISTEN_PORT")
              .help("Port to listen on")
              .takes_value(true))
-        .arg(Arg::with_name("server")
-             .short("s")
-             .long("server")
-             .value_name("SERVER")
-             .help("Address of other Raft server")
+        .arg(Arg::with_name("peer")
+             .long("peer")
+             .value_name("PEER")
+             .help("Address of a Raft peer")
              .takes_value(true)
              .multiple(true))
         .get_matches();
 
     let tls = matches.is_present("tls");
-    let port = match matches.value_of("port") {
+    let _id: u8 = matches.value_of("id").unwrap().parse().unwrap();
+    let _listen_address = matches.value_of("address").unwrap();
+    let listen_port = match matches.value_of("port") {
         Some(port) => port.parse().unwrap(),
         None => if tls { PORT_TLS } else { PORT },
     };
-    let servers = match matches.values_of("server") {
-        Some(servers) => servers.collect::<Vec<_>>(),
-        None => panic!("specify one or more servers with --server"),
+    let peers = match matches.values_of("peer") {
+        Some(peers) => peers.collect::<Vec<_>>(),
+        None => panic!("specify one or more peers with --peer"),
     };
 
-    println!("raft servers in cluster:");
-    for server in servers {
-        println!("\t{}", server);
-    }
-
     let mut server = grpc::ServerBuilder::new();
-    server.http.set_port(port);
+    server.http.set_port(listen_port);
     server.add_service(RaftServer::new_service_def(RaftImpl));
     server.http.set_cpu_pool_threads(4);
     if tls {
@@ -83,7 +92,11 @@ fn main() {
     let _server = server.build().expect("server");
 
     println!("raft server started on port {} {}",
-        port, if tls { "with tls" } else { "without tls" });
+        listen_port, if tls { "with tls" } else { "without tls" });
+    println!("raft peers in cluster:");
+    for peer in &peers {
+        println!("\t{}", peer);
+    }
 
     loop {
         thread::park();
