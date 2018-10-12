@@ -22,6 +22,10 @@ Open a development container:
         castaway:latest \
         /bin/bash
 
+Run an instance of castaway:
+
+    cargo run -- --tls
+
 Run the docker container:
 
     docker run --rm castaway:latest
