@@ -50,7 +50,7 @@ struct MessageAppendEntriesResponse {
 }
 
 /// Message invoked by candidates to gather votes (§5.2).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MessageRequestVote {
     /// Candidate's term.
     term: Term,
@@ -186,7 +186,35 @@ impl RaftServer {
 
     fn recv_append_entries_response(&mut self, peer: &Id, msg: MessageAppendEntriesResponse) {}
 
-    fn recv_request_vote(&mut self, peer: &Id, msg: MessageRequestVote) {}
+    fn recv_request_vote(&mut self, peer: &Id, msg: MessageRequestVote) -> MessageRequestVoteResponse {
+        let mut resp = MessageRequestVoteResponse {
+            term: self.current_term,
+            vote_granted: false,
+        };
+
+        if msg.term < self.current_term {
+            return resp;
+        }
+
+        match self.voted_for {
+            Some(candidate_id) if candidate_id == msg.candidate_id => {},
+            None => {},
+            _ => return resp,
+        }
+
+        if msg.last_log_index < self.log.len() {
+            return resp;
+        }
+        if let Some(entry) = self.log.get(msg.last_log_index - 1) {
+            if msg.last_log_term != entry.term() {
+                return resp;
+            }
+        }
+
+        resp.vote_granted = true;
+
+        resp
+    }
 
     fn recv_request_vote_response(&mut self, peer: &Id, msg: MessageRequestVoteResponse) {}
 }
@@ -383,7 +411,102 @@ mod tests {
         ae.leader_commit = 7;
         raft.recv_append_entries(&1, ae);
 
-        println!("log: {:?}", raft.log);
         assert_eq!(raft.commit_index, 5);;
+    }
+
+    /* RequestVote RPC tests */
+
+    // Reply false if `term` < `current_term` (§5.1).
+    #[test]
+    fn test_raft_server_recv_request_vote_reply_false_when_term_less_than_current_term() {
+        let rv = MessageRequestVote {
+            term: 1,
+            candidate_id: 1,
+            last_log_index: 5,
+            last_log_term: 5,
+        };
+
+        let mut raft = RaftServer::new();
+
+        // `current_term` is higher than `term`
+        raft.set_current_term(5);
+        let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.term, 5);
+        assert_eq!(rvr.vote_granted, false);
+    }
+
+    /*
+     * If `voted_for` is `None` or `candidate_id`, and candidate's log is at
+     * least as up-to-date as receiver's log, grant vote (§5.2, §5.4).
+     */
+
+    #[test]
+    fn test_raft_server_recv_request_vote_reply_false_when_voted_for_is_not_candidate_id() {
+        let rv = MessageRequestVote {
+            term: 5,
+            candidate_id: 1,
+            last_log_index: 5,
+            last_log_term: 5,
+        };
+
+        let mut raft = RaftServer::new();
+
+        // `voted_for` does not match `candidate_id`
+        raft.voted_for = Some(3);
+        let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.vote_granted, false);
+    }
+
+    #[test]
+    fn test_raft_server_recv_request_vote_reply_false_if_candidates_log_is_not_up_to_date() {
+        let rv = MessageRequestVote {
+            term: 1,
+            candidate_id: 1,
+            last_log_index: 3,
+            last_log_term: 3,
+        };
+
+        let mut raft = RaftServer::new();
+
+        // candidate's log is not as up-to-date as the receiver's log
+        // TODO: add these entries via an RPC call instead.
+        raft.log.append(&mut vec![
+            LogEntry((), 1),
+            LogEntry((), 2),
+            LogEntry((), 2),
+        ]);
+        let rvr = raft.recv_request_vote(&1, rv.clone());
+        assert_eq!(rvr.vote_granted, false);
+
+        // candidate's log is not as up-to-date as the receiver's log
+        // TODO: add these entries via an RPC call instead.
+        raft.log = vec![
+            LogEntry((), 1),
+            LogEntry((), 2),
+            LogEntry((), 3),
+            LogEntry((), 4),
+        ];
+        let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.vote_granted, false);
+    }
+
+    #[test]
+    fn test_raft_server_recv_request_vote_grant_vote() {
+        let rv = MessageRequestVote {
+            term: 1,
+            candidate_id: 1,
+            last_log_index: 3,
+            last_log_term: 3,
+        };
+
+        let mut raft = RaftServer::new();
+
+        // TODO: add these entries via an RPC call instead.
+        raft.log.append(&mut vec![
+            LogEntry((), 1),
+            LogEntry((), 2),
+        ]);
+        let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.vote_granted, true);
     }
 }
