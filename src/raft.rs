@@ -63,7 +63,7 @@ struct MessageRequestVote {
 }
 
 /// Message issued in response to a `RequestVote` RPC.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MessageRequestVoteResponse {
     /// `current_term`, for candidate to update itself.
     term: Term,
@@ -71,9 +71,21 @@ struct MessageRequestVoteResponse {
     vote_granted: bool,
 }
 
+/// Volatile state on candidate nodes.
+///
+/// This isn't formally specified in the Raft paper, but it is useful for
+/// tracking election status on a per-candidate basis.
+#[derive(Clone, Debug, PartialEq)]
+struct CandidateState {
+    /// Servers which have responded to a RequestVote RPC call.
+    votes_responded: Vec<Id>,
+    /// Servers which have confirmed their vote for this candidate this term.
+    votes_granted: Vec<Id>,
+}
+
 /// Volatile state on leader nodes.
-#[derive(Debug)]
-struct Leader {
+#[derive(Clone, Debug, PartialEq)]
+struct LeaderState {
     /// For each server, index of next log entry to send to that server.
     ///
     /// Initialized to leader last log index + 1.
@@ -86,9 +98,9 @@ struct Leader {
 
 #[derive(Debug, PartialEq)]
 enum RaftState {
-    _Candidate,
+    Candidate(CandidateState),
     Follower,
-    Leader,
+    Leader(LeaderState),
 }
 
 #[derive(Debug)]
@@ -237,7 +249,29 @@ impl RaftServer {
         resp
     }
 
-    fn recv_request_vote_response(&mut self, peer: &Id, msg: MessageRequestVoteResponse) {}
+    /// Server receives a RequestVote response from server `peer` wtih
+    /// `msg.term == self.current_term`.
+    fn recv_request_vote_response(&mut self, peer: &Id, msg: MessageRequestVoteResponse) {
+        // `term` should be equal to `current_term` as the server issuing the
+        // response should've increased its term to match that of the issued
+        // request, and as the request came from this server, it should match
+        // `current_term`.
+        assert!(msg.term == self.current_term);
+
+        // Mark `peer` as having responded to our RequestVote RPC.
+        match self.state {
+            RaftState::Candidate(ref mut state) => {
+                state.votes_responded.push(*peer);
+
+                // If `peer` granted the candidate their vote, add it to the
+                // list.
+                if msg.vote_granted {
+                    state.votes_granted.push(*peer);
+                }
+            },
+            _ => {},
+        }
+    }
 }
 
 /// Initializes a new, empty, replicated log.
@@ -279,9 +313,14 @@ mod tests {
     #[test]
     fn test_raft_server_set_state() {
         let mut raft = RaftServer::new();
+
+        let leader_state = LeaderState {
+            match_index: Vec::new(),
+            next_index: Vec::new(),
+        };
         assert_eq!(raft.state, RaftState::Follower);
-        raft.set_state(RaftState::Leader);
-        assert_eq!(raft.state, RaftState::Leader);
+        raft.set_state(RaftState::Leader(leader_state.clone()));
+        assert_eq!(raft.state, RaftState::Leader(leader_state));
     }
 
     /* AppendEntries RPC tests */
@@ -554,5 +593,57 @@ mod tests {
         assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, true);
         assert_eq!(raft.voted_for, Some(1));
+    }
+
+    /* RequestVote RPC response tests */
+
+    #[test]
+    fn test_raft_server_recv_request_vote_response_vote_granted() {
+        let rvr = MessageRequestVoteResponse {
+            term: 1,
+            vote_granted: true,
+        };
+
+        let mut raft = RaftServer::new();
+        // TODO: replace this with a call to `update_term`.
+        raft.current_term = 1;
+        raft.state = RaftState::Candidate(CandidateState {
+            votes_responded: Vec::new(),
+            votes_granted: Vec::new(),
+        });
+
+        assert_eq!(rvr.term, raft.current_term);
+        raft.recv_request_vote_response(&1, rvr.clone());
+        assert_eq!(raft.state,
+            RaftState::Candidate(CandidateState {
+                votes_responded: vec![1],
+                votes_granted: vec![1],
+            })
+        );
+    }
+
+    #[test]
+    fn test_raft_server_recv_request_vote_response_vote_not_granted() {
+        let rvr = MessageRequestVoteResponse {
+            term: 1,
+            vote_granted: false,
+        };
+
+        let mut raft = RaftServer::new();
+        // TODO: replace this with a call to `update_term`.
+        raft.current_term = 1;
+        raft.state = RaftState::Candidate(CandidateState {
+            votes_responded: Vec::new(),
+            votes_granted: Vec::new(),
+        });
+
+        assert_eq!(rvr.term, raft.current_term);
+        raft.recv_request_vote_response(&1, rvr.clone());
+        assert_eq!(raft.state,
+            RaftState::Candidate(CandidateState {
+                votes_responded: vec![1],
+                votes_granted: Vec::new(),
+            })
+        );
     }
 }
