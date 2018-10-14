@@ -33,3 +33,9 @@ Run the docker container:
 To launch a cluster of containers locally:
 
     docker-compose up --build
+
+## Credits
+
+* Raft interface inspired by [willemt/raft][willemt-raft]
+
+[willemt-raft]: https://github.com/willemt/raft
