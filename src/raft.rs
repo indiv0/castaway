@@ -147,6 +147,10 @@ impl RaftServer {
             success: false,
         };
 
+        if msg.term < self.current_term {
+            return resp;
+        }
+
         {
             let prev_log_entry = match self.log.get(msg.prev_log_index - 1) {
                 Some(entry) => entry,
@@ -166,7 +170,6 @@ impl RaftServer {
             })
             .count();
         let last_matching_index = msg.prev_log_index + num_matching_new_entries;
-
         if last_matching_index < self.log.len() {
             self.log.split_off(last_matching_index);
         }
@@ -180,7 +183,6 @@ impl RaftServer {
         }
 
         resp.success = true;
-
         resp
     }
 
@@ -201,7 +203,6 @@ impl RaftServer {
             None => {},
             _ => return resp,
         }
-
         if msg.last_log_index < self.log.len() {
             return resp;
         }
@@ -212,7 +213,6 @@ impl RaftServer {
         }
 
         resp.vote_granted = true;
-
         resp
     }
 
@@ -274,6 +274,7 @@ mod tests {
         // `current_term` is higher than `term`
         raft.set_current_term(5);
         let aer = raft.recv_append_entries(&1, ae);
+        assert_eq!(aer.term, 5);
         assert_eq!(aer.success, false);
     }
 
@@ -358,10 +359,10 @@ mod tests {
             LogEntry((), 1),
             LogEntry((), 2),
         ]);
-        raft.set_current_term(7);
+        raft.set_current_term(4);
         let aer = raft.recv_append_entries(&1, ae);
 
-        assert_eq!(aer.term, 7);
+        assert_eq!(aer.term, 4);
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, vec![
             LogEntry((), 1),
