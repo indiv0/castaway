@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_variables)]
 
-use std::cmp;
+use std::cmp::{self, Ordering};
 
 type Id = usize;
 type Command = ();
@@ -133,6 +133,10 @@ impl RaftServer {
         self.current_term = term;
     }
 
+    fn set_voted_for(&mut self, id: Option<Id>) {
+        self.voted_for = id;
+    }
+
     fn set_commit_index(&mut self, index: usize) {
         self.commit_index = index;
     }
@@ -188,7 +192,14 @@ impl RaftServer {
 
     fn recv_append_entries_response(&mut self, peer: &Id, msg: MessageAppendEntriesResponse) {}
 
+    /// Server receives a RequestVote request from server `peer` with `msg.term
+    /// <= self.current_term`.
     fn recv_request_vote(&mut self, peer: &Id, msg: MessageRequestVote) -> MessageRequestVoteResponse {
+        // `term` should never be greater than `current_term` as  `current_term`
+        // should've been advanced after receiving the RPC but prior to calling
+        // this handler.
+        assert!(msg.term <= self.current_term);
+
         let mut resp = MessageRequestVoteResponse {
             term: self.current_term,
             vote_granted: false,
@@ -203,20 +214,24 @@ impl RaftServer {
             None => {},
             _ => return resp,
         }
+
         // Determine if the candidate's or the receiver's log is more up-to-date.
         // The more up-to-date of the two logs is the log which:
         // 1. has the later term, if the last entries in the logs have different
         //    terms; otherwise,
         // 2. whichever log is longer is more up-to-date.
-        if let Some(entry) = self.log.last() {
-            if entry.term() > msg.last_log_term {
+        match msg.last_log_term.cmp(&last_term(&self.log)) {
+            Ordering::Less => {
                 return resp;
-            }
+            },
+            Ordering::Equal => if msg.last_log_index < self.log.len() {
+                return resp;
+            },
+            _ => {},
         }
 
-        if self.log.len() > msg.last_log_index {
-            return resp;
-        }
+        // Update the candidate that was voted for.
+        self.set_voted_for(Some(msg.candidate_id));
 
         resp.vote_granted = true;
         resp
@@ -228,6 +243,14 @@ impl RaftServer {
 /// Initializes a new, empty, replicated log.
 fn log_new() -> Log {
     Vec::new()
+}
+
+/// The term of the last entry in a log, or 0 if the log is empty.
+fn last_term(log: &Log) -> usize {
+    match log.len() {
+        0 => 0,
+        x => log[x - 1].term()
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +463,7 @@ mod tests {
         let rvr = raft.recv_request_vote(&1, rv);
         assert_eq!(rvr.term, 5);
         assert_eq!(rvr.vote_granted, false);
+        assert_eq!(raft.voted_for, None);
     }
 
     /*
@@ -460,8 +484,11 @@ mod tests {
 
         // `voted_for` does not match `candidate_id`
         raft.voted_for = Some(3);
+        raft.current_term = 5;
         let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.term, 5);
         assert_eq!(rvr.vote_granted, false);
+        assert_eq!(raft.voted_for, Some(3));
     }
 
     #[test]
@@ -475,6 +502,8 @@ mod tests {
 
         let mut raft = RaftServer::new();
 
+        // TODO: replace this with a call to `update_term`.
+        raft.current_term = 1;
         // candidate's log is not as up-to-date as the receiver's log as the
         // last entry in the receiver's log has a later term.
         // TODO: add these entries via an RPC call instead.
@@ -484,7 +513,9 @@ mod tests {
             LogEntry((), 4),
         ]);
         let rvr = raft.recv_request_vote(&1, rv.clone());
+        assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, false);
+        assert_eq!(raft.voted_for, None);
 
         // candidate's log is not as up-to-date as the receiver's log as the
         // receiver's log is longer.
@@ -496,7 +527,9 @@ mod tests {
             LogEntry((), 4),
         ];
         let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, false);
+        assert_eq!(raft.voted_for, None);
     }
 
     #[test]
@@ -510,12 +543,16 @@ mod tests {
 
         let mut raft = RaftServer::new();
 
+        // TODO: replace this with a call to `update_term`.
+        raft.current_term = 1;
         // TODO: add these entries via an RPC call instead.
         raft.log.append(&mut vec![
             LogEntry((), 1),
             LogEntry((), 2),
         ]);
         let rvr = raft.recv_request_vote(&1, rv);
+        assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, true);
+        assert_eq!(raft.voted_for, Some(1));
     }
 }
