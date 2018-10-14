@@ -203,13 +203,19 @@ impl RaftServer {
             None => {},
             _ => return resp,
         }
-        if msg.last_log_index < self.log.len() {
-            return resp;
-        }
-        if let Some(entry) = self.log.get(msg.last_log_index - 1) {
-            if msg.last_log_term != entry.term() {
+        // Determine if the candidate's or the receiver's log is more up-to-date.
+        // The more up-to-date of the two logs is the log which:
+        // 1. has the later term, if the last entries in the logs have different
+        //    terms; otherwise,
+        // 2. whichever log is longer is more up-to-date.
+        if let Some(entry) = self.log.last() {
+            if entry.term() > msg.last_log_term {
                 return resp;
             }
+        }
+
+        if self.log.len() > msg.last_log_index {
+            return resp;
         }
 
         resp.vote_granted = true;
@@ -469,17 +475,19 @@ mod tests {
 
         let mut raft = RaftServer::new();
 
-        // candidate's log is not as up-to-date as the receiver's log
+        // candidate's log is not as up-to-date as the receiver's log as the
+        // last entry in the receiver's log has a later term.
         // TODO: add these entries via an RPC call instead.
         raft.log.append(&mut vec![
             LogEntry((), 1),
             LogEntry((), 2),
-            LogEntry((), 2),
+            LogEntry((), 4),
         ]);
         let rvr = raft.recv_request_vote(&1, rv.clone());
         assert_eq!(rvr.vote_granted, false);
 
-        // candidate's log is not as up-to-date as the receiver's log
+        // candidate's log is not as up-to-date as the receiver's log as the
+        // receiver's log is longer.
         // TODO: add these entries via an RPC call instead.
         raft.log = vec![
             LogEntry((), 1),
