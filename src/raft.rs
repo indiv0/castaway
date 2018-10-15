@@ -271,7 +271,7 @@ impl RaftServer {
     /// specification states that implementations could safely accept more by
     /// treating them the same as independent requests of 1 entry.
     // TODO: ensure that only `msg.entries` of length `0` or `1` are handled.
-    fn recv_append_entries(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
+    fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
         let mut resp = MessageAppendEntriesResponse {
             term: self.current_term,
             success: false,
@@ -328,7 +328,7 @@ impl RaftServer {
     /// specified peer.
     /// Panics if the server's state does not have a `match_index` entry for the
     /// specified peer.
-    fn recv_append_entries_response(&mut self, peer: &Id, msg: &MessageAppendEntriesResponse) {
+    fn handle_append_entries_response(&mut self, peer: &Id, msg: &MessageAppendEntriesResponse) {
         // `term` should be equal to `current_term` as the server issuing the
         // response should've increased its term to match that of the issued
         // request, and as the request came from this server, it should match
@@ -366,7 +366,7 @@ impl RaftServer {
 
     /// Server receives a RequestVote request from server `peer` with `msg.term
     /// <= self.current_term`.
-    fn recv_request_vote(&mut self, peer: &Id, msg: &MessageRequestVote) -> MessageRequestVoteResponse {
+    fn handle_request_vote_request(&mut self, peer: &Id, msg: &MessageRequestVote) -> MessageRequestVoteResponse {
         // `term` should never be greater than `current_term` as  `current_term`
         // should've been advanced after receiving the RPC but prior to calling
         // this handler.
@@ -411,7 +411,7 @@ impl RaftServer {
 
     /// Server receives a RequestVote response from server `peer` wtih
     /// `msg.term == self.current_term`.
-    fn recv_request_vote_response(&mut self, peer: &Id, msg: &MessageRequestVoteResponse) {
+    fn handle_request_vote_response(&mut self, peer: &Id, msg: &MessageRequestVoteResponse) {
         // `term` should be equal to `current_term` as the server issuing the
         // response should've increased its term to match that of the issued
         // request, and as the request came from this server, it should match
@@ -472,7 +472,7 @@ impl RaftServer {
         use self::Message::*;
         match msg {
             AppendEntries(msg) => ReceiveResult::Response(Message::AppendEntriesResponse(
-                self.recv_append_entries(peer, msg)
+                self.handle_append_entries_request(peer, msg)
             )),
             AppendEntriesResponse(msg) => {
                 // Responses with stale items are ignored.
@@ -480,11 +480,11 @@ impl RaftServer {
                     return ReceiveResult::DropStaleResponse;
                 }
 
-                self.recv_append_entries_response(peer, msg);
+                self.handle_append_entries_response(peer, msg);
                 ReceiveResult::ResponseProcessed
             },
             RequestVote(msg) => ReceiveResult::Response(Message::RequestVoteResponse(
-                self.recv_request_vote(peer, msg)
+                self.handle_request_vote_request(peer, msg)
             )),
             RequestVoteResponse(msg) => {
                 // Responses with stale items are ignored.
@@ -492,7 +492,7 @@ impl RaftServer {
                     return ReceiveResult::DropStaleResponse;
                 }
 
-                self.recv_request_vote_response(peer, msg);
+                self.handle_request_vote_response(peer, msg);
                 ReceiveResult::ResponseProcessed
             },
         }
@@ -611,7 +611,7 @@ mod tests {
 
     // Reply false if `term` < `current_term` (§5.1).
     #[test]
-    fn test_raft_server_recv_append_entries_reply_false_when_term_less_than_current_term() {
+    fn test_raft_server_handle_append_entries_request_reply_false_when_term_less_than_current_term() {
         let ae = MessageAppendEntries {
             term: 1,
             leader_id: 0,
@@ -625,7 +625,7 @@ mod tests {
 
         // `current_term` is higher than `term`
         raft.set_current_term(5);
-        let aer = raft.recv_append_entries(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae);
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, false);
     }
@@ -633,7 +633,7 @@ mod tests {
     // Reply false if log doesn't contain an entry at `prev_log_index` whose
     // term matches `prev_log_term` (§5.3).
     #[test]
-    fn test_raft_server_recv_append_entries_reply_false_when_log_doesnt_contain_term_matching_prev_log_term() {
+    fn test_raft_server_handle_append_entries_request_reply_false_when_log_doesnt_contain_term_matching_prev_log_term() {
         let ae = MessageAppendEntries {
             term: 5,
             leader_id: 0,
@@ -646,7 +646,7 @@ mod tests {
         let mut raft = RaftServer::new();
 
         // `log` does not contain an entry at `prev_log_index`
-        let aer = raft.recv_append_entries(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, false);
 
@@ -654,7 +654,7 @@ mod tests {
         // matches `prev_log_term`
         // TODO: add these entries via an RPC call instead.
         raft.log.push(LogEntry((), 3));
-        let aer = raft.recv_append_entries(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, false);
     }
@@ -662,7 +662,7 @@ mod tests {
     // If an existing entry conflicts with a new one (same index but different
     // terms), delete the existing entry and all that follow it (§5.3).
     #[test]
-    fn test_raft_server_recv_append_entries_existing_entry_conflicts_with_new_one() {
+    fn test_raft_server_handle_append_entries_request_existing_entry_conflicts_with_new_one() {
         let ae = MessageAppendEntries {
             term: 5,
             leader_id: 0,
@@ -682,7 +682,7 @@ mod tests {
             LogEntry((), 3),
             LogEntry((), 3),
         ]);
-        let aer = raft.recv_append_entries(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, vec![
@@ -694,7 +694,7 @@ mod tests {
 
     // Append any new entries not already in the log.
     #[test]
-    fn test_raft_server_recv_append_entries_append_new_entries() {
+    fn test_raft_server_handle_append_entries_request_append_new_entries() {
         let ae = MessageAppendEntries {
             term: 5,
             leader_id: 0,
@@ -712,7 +712,7 @@ mod tests {
             LogEntry((), 2),
         ]);
         raft.set_current_term(4);
-        let aer = raft.recv_append_entries(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.term, 4);
         assert_eq!(aer.success, true);
@@ -727,7 +727,7 @@ mod tests {
     // If `leader_commit` > `commit_index`, set `commit_index =
     // min(leader_commit, index of last new entry)`.
     #[test]
-    fn test_raft_server_recv_append_entries_leader_commit_greater_than_commit_index() {
+    fn test_raft_server_handle_append_entries_request_leader_commit_greater_than_commit_index() {
         let mut ae = MessageAppendEntries {
             term: 5,
             leader_id: 0,
@@ -754,7 +754,7 @@ mod tests {
             LogEntry((), 3),
         ]);
         raft.set_commit_index(2);
-        raft.recv_append_entries(&1, &ae);
+        raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(raft.commit_index, 3);
 
@@ -762,7 +762,7 @@ mod tests {
         // index of last new entry
         raft.set_commit_index(2);
         ae.leader_commit = 7;
-        raft.recv_append_entries(&1, &ae);
+        raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(raft.commit_index, 5);;
     }
@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_raft_server_recv_append_entries_response_invalid_term() {
+    fn test_raft_server_handle_append_entries_response_invalid_term() {
         let aer = MessageAppendEntriesResponse {
             term: 1,
             success: true,
@@ -781,11 +781,11 @@ mod tests {
 
         // `current_term` is not equal to `term`
         raft.set_current_term(0);
-        raft.recv_append_entries_response(&1, &aer);
+        raft.handle_append_entries_response(&1, &aer);
     }
 
     #[test]
-    fn test_raft_server_recv_append_entries_response_success() {
+    fn test_raft_server_handle_append_entries_response_success() {
         let aer = MessageAppendEntriesResponse {
             term: 1,
             success: true,
@@ -808,7 +808,7 @@ mod tests {
             match_index: [(1, 0), (2, 0)].iter().cloned().collect(),
         });
 
-        raft.recv_append_entries_response(&1, &aer);
+        raft.handle_append_entries_response(&1, &aer);
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 8), (2, 7)].iter().cloned().collect(),
             match_index: [(1, 1), (2, 0)].iter().cloned().collect(),
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn test_raft_server_recv_append_entries_response_not_success() {
+    fn test_raft_server_handle_append_entries_response_not_success() {
         let aer = MessageAppendEntriesResponse {
             term: 1,
             success: false,
@@ -839,7 +839,7 @@ mod tests {
             match_index: [(1, 0), (2, 0)].iter().cloned().collect(),
         });
 
-        raft.recv_append_entries_response(&1, &aer);
+        raft.handle_append_entries_response(&1, &aer);
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 6), (2, 7)].iter().cloned().collect(),
             match_index: [(1, 0), (2, 0)].iter().cloned().collect(),
@@ -850,7 +850,7 @@ mod tests {
 
     // Reply false if `term` < `current_term` (§5.1).
     #[test]
-    fn test_raft_server_recv_request_vote_reply_false_when_term_less_than_current_term() {
+    fn test_raft_server_handle_request_vote_request_reply_false_when_term_less_than_current_term() {
         let rv = MessageRequestVote {
             term: 1,
             candidate_id: 1,
@@ -862,7 +862,7 @@ mod tests {
 
         // `current_term` is higher than `term`
         raft.set_current_term(5);
-        let rvr = raft.recv_request_vote(&1, &rv);
+        let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 5);
         assert_eq!(rvr.vote_granted, false);
         assert_eq!(raft.voted_for, None);
@@ -874,7 +874,7 @@ mod tests {
      */
 
     #[test]
-    fn test_raft_server_recv_request_vote_reply_false_when_voted_for_is_not_candidate_id() {
+    fn test_raft_server_handle_request_vote_request_reply_false_when_voted_for_is_not_candidate_id() {
         let rv = MessageRequestVote {
             term: 5,
             candidate_id: 1,
@@ -887,14 +887,14 @@ mod tests {
         // `voted_for` does not match `candidate_id`
         raft.voted_for = Some(3);
         raft.current_term = 5;
-        let rvr = raft.recv_request_vote(&1, &rv);
+        let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 5);
         assert_eq!(rvr.vote_granted, false);
         assert_eq!(raft.voted_for, Some(3));
     }
 
     #[test]
-    fn test_raft_server_recv_request_vote_reply_false_if_candidates_log_is_not_up_to_date() {
+    fn test_raft_server_handle_request_vote_request_reply_false_if_candidates_log_is_not_up_to_date() {
         let rv = MessageRequestVote {
             term: 1,
             candidate_id: 1,
@@ -914,7 +914,7 @@ mod tests {
             LogEntry((), 2),
             LogEntry((), 4),
         ]);
-        let rvr = raft.recv_request_vote(&1, &rv);
+        let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, false);
         assert_eq!(raft.voted_for, None);
@@ -928,14 +928,14 @@ mod tests {
             LogEntry((), 3),
             LogEntry((), 4),
         ];
-        let rvr = raft.recv_request_vote(&1, &rv);
+        let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, false);
         assert_eq!(raft.voted_for, None);
     }
 
     #[test]
-    fn test_raft_server_recv_request_vote_grant_vote() {
+    fn test_raft_server_handle_request_vote_request_grant_vote() {
         let rv = MessageRequestVote {
             term: 1,
             candidate_id: 1,
@@ -952,7 +952,7 @@ mod tests {
             LogEntry((), 1),
             LogEntry((), 2),
         ]);
-        let rvr = raft.recv_request_vote(&1, &rv);
+        let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, true);
         assert_eq!(raft.voted_for, Some(1));
@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_raft_server_recv_request_vote_response_invalid_term() {
+    fn test_raft_server_handle_request_vote_response_invalid_term() {
         let rvr = MessageRequestVoteResponse {
             term: 1,
             vote_granted: true,
@@ -972,11 +972,11 @@ mod tests {
 
         // `current_term` is not equal to `term`
         raft.set_current_term(0);
-        raft.recv_request_vote_response(&1, &rvr);
+        raft.handle_request_vote_response(&1, &rvr);
     }
 
     #[test]
-    fn test_raft_server_recv_request_vote_response_vote_granted() {
+    fn test_raft_server_handle_request_vote_response_vote_granted() {
         let rvr = MessageRequestVoteResponse {
             term: 1,
             vote_granted: true,
@@ -991,7 +991,7 @@ mod tests {
         });
 
         assert_eq!(rvr.term, raft.current_term);
-        raft.recv_request_vote_response(&1, &rvr);
+        raft.handle_request_vote_response(&1, &rvr);
         assert_eq!(raft.state,
             RaftState::Candidate(CandidateState {
                 votes_responded: [1].iter().cloned().collect(),
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn test_raft_server_recv_request_vote_response_vote_not_granted() {
+    fn test_raft_server_handle_request_vote_response_vote_not_granted() {
         let rvr = MessageRequestVoteResponse {
             term: 1,
             vote_granted: false,
@@ -1016,7 +1016,7 @@ mod tests {
         });
 
         assert_eq!(rvr.term, raft.current_term);
-        raft.recv_request_vote_response(&1, &rvr);
+        raft.handle_request_vote_response(&1, &rvr);
         assert_eq!(raft.state,
             RaftState::Candidate(CandidateState {
                 votes_responded: [1].iter().cloned().collect(),
