@@ -785,4 +785,12 @@ mod tests {
             })
         );
     }
+
+    /* Helper tests */
+
+    #[test]
+    fn test_last_term() {
+        assert_eq!(last_term(&Vec::new()), 0);
+        assert_eq!(last_term(&vec![LogEntry((), 0), LogEntry((), 1)]), 1);
+    }
 }
