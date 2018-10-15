@@ -1,7 +1,8 @@
 #![allow(dead_code, unused_variables)]
 
 use std::cmp::{self, Ordering};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 type Id = usize;
 type Command = ();
@@ -322,6 +323,18 @@ impl RaftServer {
 /// Initializes a new, empty, replicated log.
 fn log_new() -> Log {
     Vec::new()
+}
+
+/// Returns true if a subset of a set constitutes a quorum (i.e., a majority).
+///
+/// # Assumptions
+///
+/// It is assumed that `subset` is a subset of `set`.
+fn is_quorum<T>(subset: &HashSet<T>, set: &HashSet<T>) -> bool
+    where T: Eq + Hash,
+{
+    assert!(subset.is_subset(set));
+    subset.len() * 2 > set.len()
 }
 
 /// The term of the last entry in a log, or 0 if the log is empty.
@@ -792,5 +805,22 @@ mod tests {
     fn test_last_term() {
         assert_eq!(last_term(&Vec::new()), 0);
         assert_eq!(last_term(&vec![LogEntry((), 0), LogEntry((), 1)]), 1);
+    }
+
+    #[test]
+    fn test_is_quorum() {
+        let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
+
+        assert!(!is_quorum(&[0, 1].iter().cloned().collect(), &servers));
+        assert!(is_quorum(&[0, 1, 2].iter().cloned().collect(), &servers));
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: subset.is_subset(set)")]
+    fn test_is_quorum_panic_not_subset() {
+        is_quorum(
+            &[5].iter().cloned().collect(),
+            &[0, 1, 2, 3, 4].iter().cloned().collect(),
+        );
     }
 }
