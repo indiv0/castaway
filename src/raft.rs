@@ -80,9 +80,9 @@ struct MessageRequestVoteResponse {
 #[derive(Clone, Debug, PartialEq)]
 struct CandidateState {
     /// Servers which have responded to a RequestVote RPC call.
-    votes_responded: Vec<Id>,
+    votes_responded: HashSet<Id>,
     /// Servers which have confirmed their vote for this candidate this term.
-    votes_granted: Vec<Id>,
+    votes_granted: HashSet<Id>,
 }
 
 /// Volatile state on leader nodes.
@@ -157,6 +157,30 @@ impl RaftServer {
 
     fn set_state(&mut self, state: RaftState) {
         self.state = state;
+    }
+
+    /// Candidate transitions to leader.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server is not currently in the candidate state.
+    /// Panics if the server does not have enough votes to form a quorum.
+    fn become_leader(&mut self, servers: &HashSet<Id>) {
+        {
+            let state = match self.state {
+                RaftState::Candidate(ref state) => state,
+                _ => panic!("become_leader called on non-candidate node"),
+            };
+
+            if !is_quorum(&state.votes_granted, servers) {
+                panic!("insufficient votes for quorum");
+            }
+        }
+
+        self.state = RaftState::Leader(LeaderState {
+            next_index: servers.iter().cloned().map(|s| (s, self.log.len() + 1)).collect(),
+            match_index: servers.iter().cloned().map(|s| (s, 0)).collect(),
+        });
     }
 
     fn recv_append_entries(&mut self, peer: &Id, mut msg: MessageAppendEntries) -> MessageAppendEntriesResponse {
@@ -307,12 +331,16 @@ impl RaftServer {
         // Mark `peer` as having responded to our RequestVote RPC.
         match self.state {
             RaftState::Candidate(ref mut state) => {
-                state.votes_responded.push(*peer);
+                let not_present = state.votes_responded.insert(*peer);
+                // The vote MUST not have already been present.
+                assert!(not_present);
 
                 // If `peer` granted the candidate their vote, add it to the
                 // list.
                 if msg.vote_granted {
-                    state.votes_granted.push(*peer);
+                    let not_present = state.votes_granted.insert(*peer);
+                    // The vote MUST not have already been present.
+                    assert!(not_present);
                 }
             },
             _ => {},
@@ -379,6 +407,53 @@ mod tests {
         assert_eq!(raft.state, RaftState::Follower);
         raft.set_state(RaftState::Leader(leader_state.clone()));
         assert_eq!(raft.state, RaftState::Leader(leader_state));
+    }
+
+    /* `RaftServer::become_leader` tests */
+
+    #[test]
+    fn test_raft_server_become_leader() {
+        let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
+
+        let mut raft = RaftServer::new();
+        raft.state = RaftState::Candidate(CandidateState {
+            votes_responded: [0, 1, 2, 3].iter().cloned().collect(),
+            votes_granted: [0, 1, 2].iter().cloned().collect(),
+        });
+        raft.log.append(&mut vec![
+            LogEntry((), 1),
+            LogEntry((), 2),
+            LogEntry((), 3),
+        ]);
+
+        raft.become_leader(&servers);
+        assert_eq!(raft.state, RaftState::Leader(LeaderState {
+            next_index: [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)].iter().cloned().collect(),
+            match_index: [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)].iter().cloned().collect(),
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "become_leader called on non-candidate node")]
+    fn test_raft_server_become_leader_panic_already_leader() {
+        let mut raft = RaftServer::new();
+
+        // `state` is `Leader`
+        raft.state = RaftState::Leader(LeaderState {
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+        });
+        raft.become_leader(&HashSet::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "become_leader called on non-candidate node")]
+    fn test_raft_server_become_leader_panic_state_is_follower() {
+        let mut raft = RaftServer::new();
+
+        // `state` is `Follower`
+        raft.state = RaftState::Follower;
+        raft.become_leader(&HashSet::new());
     }
 
     /* AppendEntries RPC tests */
@@ -760,16 +835,16 @@ mod tests {
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
         raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: Vec::new(),
-            votes_granted: Vec::new(),
+            votes_responded: HashSet::new(),
+            votes_granted: HashSet::new(),
         });
 
         assert_eq!(rvr.term, raft.current_term);
         raft.recv_request_vote_response(&1, rvr.clone());
         assert_eq!(raft.state,
             RaftState::Candidate(CandidateState {
-                votes_responded: vec![1],
-                votes_granted: vec![1],
+                votes_responded: [1].iter().cloned().collect(),
+                votes_granted: [1].iter().cloned().collect(),
             })
         );
     }
@@ -785,16 +860,16 @@ mod tests {
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
         raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: Vec::new(),
-            votes_granted: Vec::new(),
+            votes_responded: HashSet::new(),
+            votes_granted: HashSet::new(),
         });
 
         assert_eq!(rvr.term, raft.current_term);
         raft.recv_request_vote_response(&1, rvr.clone());
         assert_eq!(raft.state,
             RaftState::Candidate(CandidateState {
-                votes_responded: vec![1],
-                votes_granted: Vec::new(),
+                votes_responded: [1].iter().cloned().collect(),
+                votes_granted: HashSet::new(),
             })
         );
     }
