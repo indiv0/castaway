@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables)]
 
 use std::cmp::{self, Ordering};
+use std::collections::HashMap;
 
 type Id = usize;
 type Command = ();
@@ -89,11 +90,11 @@ struct LeaderState {
     /// For each server, index of next log entry to send to that server.
     ///
     /// Initialized to leader last log index + 1.
-    next_index: Vec<usize>,
+    next_index: HashMap<Id, usize>,
     /// For each server, index of highest log entry known to be replicated on server.
     ///
     /// Initialized to 0, increases monotonically.
-    match_index: Vec<usize>,
+    match_index: HashMap<Id, usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -202,7 +203,51 @@ impl RaftServer {
         resp
     }
 
-    fn recv_append_entries_response(&mut self, peer: &Id, msg: MessageAppendEntriesResponse) {}
+    /// Server receives an AppendEntries response from `peer` with `msg.term ==
+    /// self.current_term`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server handling the response is not currently a leader.
+    /// Panics if the server's state does not have a `next_index` entry for the
+    /// specified peer.
+    /// Panics if the server's state does not have a `match_index` entry for the
+    /// specified peer.
+    fn recv_append_entries_response(&mut self, peer: &Id, msg: MessageAppendEntriesResponse) {
+        // `term` should be equal to `current_term` as the server issuing the
+        // response should've increased its term to match that of the issued
+        // request, and as the request came from this server, it should match
+        // `current_term`.
+        assert!(msg.term == self.current_term);
+
+        match self.state {
+            RaftState::Leader(ref mut state) => {
+                match state.next_index.get_mut(peer) {
+                    Some(next_index) => {
+                        if msg.success {
+                            *next_index = *next_index + 1;
+                        } else {
+                            *next_index = cmp::max(*next_index - 1, 1);
+                            // `match_index` does not have to be modified if the
+                            // RPC call was unsuccessful, so we can return
+                            // early.
+                            return;
+                        }
+                    },
+                    None => panic!("Leader state missing next_index for peer {}", peer),
+                };
+
+                match state.match_index.get_mut(peer) {
+                    Some(match_index) => {
+                        assert!(msg.success);
+                        *match_index = *match_index + 1;
+                    },
+                    None => panic!("Leader state missing match_index for peer {}", peer),
+                };
+            },
+            _ => panic!("Non-leader node handling AppendEntries response"),
+        }
+    }
 
     /// Server receives a RequestVote request from server `peer` with `msg.term
     /// <= self.current_term`.
@@ -315,8 +360,8 @@ mod tests {
         let mut raft = RaftServer::new();
 
         let leader_state = LeaderState {
-            match_index: Vec::new(),
-            next_index: Vec::new(),
+            match_index: HashMap::new(),
+            next_index: HashMap::new(),
         };
         assert_eq!(raft.state, RaftState::Follower);
         raft.set_state(RaftState::Leader(leader_state.clone()));
@@ -483,6 +528,85 @@ mod tests {
         assert_eq!(raft.commit_index, 5);;
     }
 
+    /* AppendEntries RPC response tests */
+
+    #[test]
+    #[should_panic]
+    fn test_raft_server_recv_append_entries_response_invalid_term() {
+        let aer = MessageAppendEntriesResponse {
+            term: 1,
+            success: true,
+        };
+
+        let mut raft = RaftServer::new();
+
+        // `current_term` is not equal to `term`
+        raft.set_current_term(0);
+        raft.recv_append_entries_response(&1, aer);
+    }
+
+    #[test]
+    fn test_raft_server_recv_append_entries_response_success() {
+        let aer = MessageAppendEntriesResponse {
+            term: 1,
+            success: true,
+        };
+
+        let mut raft = RaftServer::new();
+        raft.set_current_term(1);
+        raft.log.append(&mut vec![
+            LogEntry((), 1),
+            LogEntry((), 1),
+            LogEntry((), 2),
+            LogEntry((), 2),
+            LogEntry((), 3),
+            LogEntry((), 3),
+        ]);
+        // NOTE: we're assuming here that there are 3 Raft peers: 0
+        // (this server), 1 (the one sending the response), and 2.
+        raft.state = RaftState::Leader(LeaderState {
+            next_index: [(1, 7), (2, 7)].iter().cloned().collect(),
+            match_index: [(1, 0), (2, 0)].iter().cloned().collect(),
+        });
+
+        raft.recv_append_entries_response(&1, aer);
+        assert_eq!(raft.state, RaftState::Leader(LeaderState {
+            next_index: [(1, 8), (2, 7)].iter().cloned().collect(),
+            match_index: [(1, 1), (2, 0)].iter().cloned().collect(),
+        }));
+    }
+
+    #[test]
+    fn test_raft_server_recv_append_entries_response_not_success() {
+        let aer = MessageAppendEntriesResponse {
+            term: 1,
+            success: false,
+        };
+
+        let mut raft = RaftServer::new();
+        raft.set_current_term(1);
+        raft.log.append(&mut vec![
+            LogEntry((), 1),
+            LogEntry((), 1),
+            LogEntry((), 2),
+            LogEntry((), 2),
+            LogEntry((), 3),
+            LogEntry((), 3),
+        ]);
+        // NOTE: we're assuming here that there are 3 Raft peers: 0
+        // (this server), 1 (the one sending the response), and 2.
+        raft.state = RaftState::Leader(LeaderState {
+            next_index: [(1, 7), (2, 7)].iter().cloned().collect(),
+            match_index: [(1, 0), (2, 0)].iter().cloned().collect(),
+        });
+
+        raft.recv_append_entries_response(&1, aer);
+        assert_eq!(raft.state, RaftState::Leader(LeaderState {
+            next_index: [(1, 6), (2, 7)].iter().cloned().collect(),
+            match_index: [(1, 0), (2, 0)].iter().cloned().collect(),
+        }));
+    }
+
     /* RequestVote RPC tests */
 
     // Reply false if `term` < `current_term` (§5.1).
@@ -596,6 +720,21 @@ mod tests {
     }
 
     /* RequestVote RPC response tests */
+
+    #[test]
+    #[should_panic]
+    fn test_raft_server_recv_request_vote_response_invalid_term() {
+        let rvr = MessageRequestVoteResponse {
+            term: 1,
+            vote_granted: true,
+        };
+
+        let mut raft = RaftServer::new();
+
+        // `current_term` is not equal to `term`
+        raft.set_current_term(0);
+        raft.recv_request_vote_response(&1, rvr);
+    }
 
     #[test]
     fn test_raft_server_recv_request_vote_response_vote_granted() {
