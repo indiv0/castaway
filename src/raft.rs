@@ -219,6 +219,17 @@ impl RaftServer {
         });
     }
 
+    /* Message handlers */
+
+    /// Server receives an AppendEntries request from `peer` with `msg.term <=
+    /// self.current_term`.
+    ///
+    /// # Note
+    ///
+    /// This just handles `msg.entries` of length 0 or 1, but the Raft formal
+    /// specification states that implementations could safely accept more by
+    /// treating them the same as independent requests of 1 entry.
+    // TODO: ensure that only `msg.entries` of length `0` or `1` are handled.
     fn recv_append_entries(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
         let mut resp = MessageAppendEntriesResponse {
             term: self.current_term,
