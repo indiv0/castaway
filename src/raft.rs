@@ -22,6 +22,11 @@ impl LogEntry {
     }
 }
 
+/// RPC request or response message.
+trait Message {
+    fn term(&self) -> usize;
+}
+
 /// Message invoked by leader to replicate log entries (§5.3); also used as
 /// heartbeat (§5.2).
 #[derive(Clone, Debug)]
@@ -42,6 +47,12 @@ struct MessageAppendEntries {
     leader_commit: usize,
 }
 
+impl Message for MessageAppendEntries {
+    fn term(&self) -> usize {
+        self.term
+    }
+}
+
 /// Message issued in response to an `AppendEntries` RPC.
 #[derive(Debug)]
 struct MessageAppendEntriesResponse {
@@ -49,6 +60,12 @@ struct MessageAppendEntriesResponse {
     term: Term,
     /// `true` if follower contained entry matching `prev_log_index` and `prev_log_term`.
     success: bool,
+}
+
+impl Message for MessageAppendEntriesResponse {
+    fn term(&self) -> usize {
+        self.term
+    }
 }
 
 /// Message invoked by candidates to gather votes (§5.2).
@@ -64,6 +81,12 @@ struct MessageRequestVote {
     last_log_term: usize,
 }
 
+impl Message for MessageRequestVote {
+    fn term(&self) -> usize {
+        self.term
+    }
+}
+
 /// Message issued in response to a `RequestVote` RPC.
 #[derive(Clone, Debug)]
 struct MessageRequestVoteResponse {
@@ -71,6 +94,12 @@ struct MessageRequestVoteResponse {
     term: Term,
     /// `true` means candidate received vote.
     vote_granted: bool,
+}
+
+impl Message for MessageRequestVoteResponse {
+    fn term(&self) -> usize {
+        self.term
+    }
 }
 
 /// Volatile state on candidate nodes.
@@ -345,6 +374,26 @@ impl RaftServer {
             },
             _ => {},
         }
+    }
+
+    /// Any RPC with a newer `term` causes the recipient to advance to its term
+    /// first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the RPC's `term` is not greater than `self.current_term`.
+    fn update_term<M>(&mut self, peer: &Id, msg: &M)
+        where M: Message,
+    {
+        // The term only needs to be updated if the RPC's `term` is greater than
+        // the server's `current_term`.
+        assert!(msg.term() > self.current_term);
+
+        self.current_term = msg.term();
+        // Updating to a newer term puts the node into the follower state.
+        self.state = RaftState::Follower;
+        // Reset `voted_for` as we have not voted for anyone in the new term.
+        self.voted_for = None;
     }
 }
 
@@ -872,6 +921,45 @@ mod tests {
                 votes_granted: HashSet::new(),
             })
         );
+    }
+
+    /* RaftServer::update_term tests */
+
+    #[test]
+    #[should_panic(expected = "assertion failed: msg.term() > self.current_term")]
+    fn test_raft_server_update_term_older_term() {
+        let rvr = MessageRequestVoteResponse {
+            term: 1,
+            vote_granted: false,
+        };
+
+        let mut raft = RaftServer::new();
+        // `current_term` is greater than `term`.
+        raft.current_term = 2;
+
+        raft.update_term(&1, &rvr);
+    }
+
+    #[test]
+    fn test_raft_server_update_term_newer_term() {
+        let rvr = MessageRequestVoteResponse {
+            term: 2,
+            vote_granted: false,
+        };
+
+        let mut raft = RaftServer::new();
+        // `current_term` is less than `term`.
+        raft.current_term = 1;
+        raft.state = RaftState::Leader(LeaderState {
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+        });
+        raft.voted_for = Some(1);
+
+        raft.update_term(&1, &rvr);
+        assert_eq!(raft.current_term, 2);
+        assert_eq!(raft.state, RaftState::Follower);
+        assert_eq!(raft.voted_for, None);
     }
 
     /* Helper tests */
