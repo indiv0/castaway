@@ -195,6 +195,33 @@ impl RaftServer {
         self.state = state;
     }
 
+    /// Server restarts from stable storage.
+    /// It loses everything but its `current_term`, `voted_for`, and `log`.
+    fn restart(&mut self) {
+        unimplemented!();
+    }
+
+    /// Server times out and starts a new election.
+    fn timeout(&mut self) {
+        unimplemented!();
+    }
+
+    /// Candidate sends `peer` a RequestVote request.
+    fn request_vote(&mut self, peer: &Id) {
+        unimplemented!();
+    }
+
+    /// Leader sends `peer` an AppendEntries request containing up to 1 entry.
+    ///
+    /// # Notes
+    ///
+    /// While the Raft specification allows implementations to send more than 1
+    /// at a time, this implementation follows the formal specification of just
+    /// 1 because "it minimizes atomic regions without loss of generality".
+    fn append_entries(&self, peer: &Id) {
+        unimplemented!();
+    }
+
     /// Candidate transitions to leader.
     ///
     /// # Panics
@@ -217,6 +244,20 @@ impl RaftServer {
             next_index: servers.iter().cloned().map(|s| (s, self.log.len() + 1)).collect(),
             match_index: servers.iter().cloned().map(|s| (s, 0)).collect(),
         });
+    }
+
+    /// Leader receives a client request to add `v` to the log.
+    fn client_request(&mut self, v: Command) {
+        unimplemented!();
+    }
+
+    /// Leader advances its `commit_index`.
+    ///
+    /// This is done as a separate step from handling `AppendEntries` responses,
+    /// in part to minimize atomic regions, and in part so that leaders of
+    /// single-server clusters are able to mark entries committed.
+    fn advance_commit_index(&mut self) {
+        unimplemented!();
     }
 
     /* Message handlers */
