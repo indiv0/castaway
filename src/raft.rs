@@ -443,57 +443,156 @@ impl RaftServer {
     /// Server receives an AppendEntries request from `peer` with `msg.term <=
     /// self.current_term`.
     ///
+    /// Returns a response intended for the server which sent the request, if a
+    /// response must be sent.
+    ///
     /// # Note
     ///
     /// This just handles `msg.entries` of length 0 or 1, but the Raft formal
     /// specification states that implementations could safely accept more by
     /// treating them the same as independent requests of 1 entry.
+    ///
+    /// # Invariants
+    ///
+    /// 1. `msg.term <= self.current_term` must always be true when this
+    /// function is called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any invariants are violated.
     // TODO: ensure that only `msg.entries` of length `0` or `1` are handled.
-    fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
-        let mut resp = MessageAppendEntriesResponse {
-            term: self.current_term,
-            success: false,
+    fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> Option<MessageAppendEntriesResponse> {
+        // Assert the invariants.
+        assert!(msg.term <= self.current_term);
+
+        // If we are a leader, we simply ignore the AppendEntries RPC.
+        if self.is_leader() {
+            return None;
+        }
+
+        // If `msg.term < self.current_term` we reject the request.
+        if msg.term < self.current_term {
+            return Some(MessageAppendEntriesResponse {
+                term: self.current_term,
+                success: false,
+            });
+        }
+
+        assert_eq!(msg.term, self.current_term);
+
+        // If we're a candidate, we should return to the follower state upon
+        // receiving this RPC, and not respond to the message.
+        if self.is_candidate() {
+            self.state = RaftState::Follower;
+            return None;
+        }
+
+        // If we're not a candidate, we must be a follower as leaders ignore
+        // incoming AppendEntries RPCs.
+        assert!(self.is_follower());
+
+        // Verify that our log history matches the history of the server which
+        // issued the request.
+        let log_ok =
+        {
+            if msg.prev_log_index == 0 {
+                true
+            } else if msg.prev_log_index > 0 {
+                if msg.prev_log_index <= self.log.len() {
+                    let prev_log_entry = match self.log.get(msg.prev_log_index - 1) {
+                        Some(entry) => entry,
+                        // TODO: this should be unreachable?
+                        None => {
+                            return Some(MessageAppendEntriesResponse {
+                                term: self.current_term,
+                                success: false,
+                            });
+                        },
+                    };
+
+                    if msg.prev_log_term == prev_log_entry.term() {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         };
 
-        if msg.term < self.current_term {
-            return resp;
+        // If the previous log records (as outlined in the incoming message) do
+        // not match our existing log history, we reject the request.
+        if !log_ok {
+            return Some(MessageAppendEntriesResponse {
+                term: self.current_term,
+                success: false,
+            });
         }
+
+        assert!(log_ok);
+
+        // At this point, the request has been accepted, but has not been
+        // processed.
+
+        // The index of the new entry to be inserted.
+        let index = msg.prev_log_index + 1;
+
+        // If the request contains no entries, it is a heartbeat, and is
+        // accepted.
+        if msg.entries.is_empty() {
+            // This could make our `commit_index` decrease (e.g. if we
+            // process an old, duplicated request), but that doesn't affect
+            // anything.
+            self.commit_index = msg.leader_commit;
+            return Some(MessageAppendEntriesResponse {
+                term: self.current_term,
+                success: true,
+            });
+        }
+
+        assert!(!msg.entries.is_empty());
+
+        // If our log does not already contain an entry at the new index,
+        // then there can be no conflict and the entry may simply be
+        // appended.
+        if self.log.len() == msg.prev_log_index {
+            // TODO: find a way to take ownership of `msg` and remove this
+            // `clone`.
+            self.log.push(msg.entries[0].clone());
+            return None;
+        }
+
+        // If our log already contains an entry at the new index, it's
+        // either because: we've already appended it; or there is a
+        // conflict.
+        assert!(self.log.len() >= index);
 
         {
-            let prev_log_entry = match self.log.get(msg.prev_log_index - 1) {
-                Some(entry) => entry,
-                None => return resp,
-            };
-
-            if prev_log_entry.term() != msg.prev_log_term {
-                return resp;
+            // If the term of new entry and the one already in the log match,
+            // that means the entry has already been appended. Otherwise,
+            // there's a conflict.
+            let entry = &self.log[index - 1];
+            if entry.term() == msg.entries[0].term() {
+                // This could make our `commit_index` decrease (e.g. if we
+                // process an old, duplicated request), but that doesn't affect
+                // anything.
+                self.commit_index = msg.leader_commit;
+                return Some(MessageAppendEntriesResponse {
+                    term: self.current_term,
+                    success: true,
+                });
             }
+
+            assert!(entry.term() != msg.entries[0].term());
         }
 
-        let num_matching_new_entries = self.log.iter()
-            .skip(msg.prev_log_index)
-            .zip(&msg.entries)
-            .take_while(|(entry, new_entry)| {
-                entry.term() == new_entry.term()
-            })
-            .count();
-        let last_matching_index = msg.prev_log_index + num_matching_new_entries;
-        if last_matching_index < self.log.len() {
-            self.log.split_off(last_matching_index);
-        }
-
-        // TODO: find a way to take ownership of `msg` and remove this costly
-        // `clone`.
-        let mut new_entries = msg.entries.clone().split_off(num_matching_new_entries);
-        self.log.append(&mut new_entries);
-
-        if msg.leader_commit > self.commit_index {
-            let index_of_last_new_entry = self.log.len();
-            self.set_commit_index(cmp::min(msg.leader_commit, index_of_last_new_entry));
-        }
-
-        resp.success = true;
-        resp
+        // When there's a conflict, we simply remove the last item in the log.
+        let conflict_index = self.log.len();
+        self.log.remove(conflict_index - 1);
+        None
     }
 
     /// Server receives an AppendEntries response from `peer` with `msg.term ==
@@ -900,7 +999,7 @@ mod tests {
             leader_commit: 0,
         }));
         let res = raft1.handle_append_entries_request(&0, &req.unwrap());
-        raft.handle_append_entries_response(&1, &res);
+        raft.handle_append_entries_response(&1, &res.unwrap());
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 2)].iter().cloned().collect(),
             match_index: [(1, 0)].iter().cloned().collect(),
@@ -932,7 +1031,7 @@ mod tests {
             leader_commit: 0,
         }));
         let res = raft1.handle_append_entries_request(&0, &req.unwrap());
-        raft.handle_append_entries_response(&1, &res);
+        raft.handle_append_entries_response(&1, &res.unwrap());
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 1)].iter().cloned().collect(),
             match_index: [(1, 0)].iter().cloned().collect(),
@@ -1143,7 +1242,7 @@ mod tests {
 
         // `current_term` is higher than `term`
         raft.set_current_term(5);
-        let aer = raft.handle_append_entries_request(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, false);
     }
@@ -1164,7 +1263,7 @@ mod tests {
         let mut raft = RaftServer::new(0);
 
         // `log` does not contain an entry at `prev_log_index`
-        let aer = raft.handle_append_entries_request(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
 
         assert_eq!(aer.success, false);
 
@@ -1172,7 +1271,7 @@ mod tests {
         // matches `prev_log_term`
         // TODO: add these entries via an RPC call instead.
         raft.log.push(LogEntry((), 3));
-        let aer = raft.handle_append_entries_request(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
 
         assert_eq!(aer.success, false);
     }
@@ -1200,7 +1299,7 @@ mod tests {
             LogEntry((), 3),
             LogEntry((), 3),
         ]);
-        let aer = raft.handle_append_entries_request(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
 
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, vec![
@@ -1230,7 +1329,7 @@ mod tests {
             LogEntry((), 2),
         ]);
         raft.set_current_term(4);
-        let aer = raft.handle_append_entries_request(&1, &ae);
+        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
 
         assert_eq!(aer.term, 4);
         assert_eq!(aer.success, true);
