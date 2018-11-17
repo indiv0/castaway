@@ -1277,6 +1277,7 @@ mod tests {
         };
 
         let mut raft = RaftServer::new(0);
+        raft.set_current_term(5);
 
         // `log` does not contain an entry at `prev_log_index`
         let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
@@ -1299,9 +1300,9 @@ mod tests {
         let ae = MessageAppendEntries {
             term: 5,
             leader_id: 0,
-            prev_log_index: 1,
-            prev_log_term: 1,
-            entries: vec![LogEntry((), 2), LogEntry((), 4)],
+            prev_log_index: 2,
+            prev_log_term: 2,
+            entries: vec![LogEntry((), 4)],
             leader_commit: 0,
         };
 
@@ -1315,13 +1316,17 @@ mod tests {
             LogEntry((), 3),
             LogEntry((), 3),
         ]);
+        raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
 
+        // NOTE: although the conflicting entry and all that follow it should be
+        // be removed eventually, each conflicting AppendEntries RPC call will
+        // only remove one entry at a time.
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, vec![
             LogEntry((), 1),
             LogEntry((), 2),
-            LogEntry((), 4),
+            LogEntry((), 3),
         ]);
     }
 
@@ -1403,6 +1408,7 @@ mod tests {
         };
 
         let mut raft = RaftServer::new(0);
+        raft.set_current_term(5);
 
         // `leader_commit` is greater than `commit_index`, and less than index
         // of last new entry
@@ -1424,7 +1430,7 @@ mod tests {
         ae.leader_commit = 7;
         raft.handle_append_entries_request(&1, &ae);
 
-        assert_eq!(raft.commit_index, 5);;
+        assert_eq!(raft.commit_index, 4);;
     }
 
     /* AppendEntries RPC response tests */
