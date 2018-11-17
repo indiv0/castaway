@@ -27,6 +27,9 @@ impl LogEntry {
 pub enum ReceiveResult {
     /// A response with a stale term was received, and so must be dropped.
     DropStaleResponse,
+    /// An RPC request was processed, but it is not necessary to send a
+    /// response.
+    RequestProcessed,
     /// An RPC request was processed, a response was generated and must be sent.
     // TODO: enforce the invariant that ONLY response-type messages should be
     // returned here.
@@ -748,9 +751,10 @@ impl RaftServer {
 
         use self::Message::*;
         match msg {
-            AppendEntries(msg) => ReceiveResult::Response(Message::AppendEntriesResponse(
-                self.handle_append_entries_request(peer, msg)
-            )),
+            AppendEntries(msg) => match self.handle_append_entries_request(peer, msg) {
+                Some(response) => ReceiveResult::Response(Message::AppendEntriesResponse(response)),
+                None => ReceiveResult::RequestProcessed,
+            },
             AppendEntriesResponse(msg) => {
                 // Responses with stale items are ignored.
                 if msg.term < self.current_term {
