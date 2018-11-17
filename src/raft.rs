@@ -469,6 +469,9 @@ impl RaftServer {
         assert!(msg.term <= self.current_term);
 
         // If we are a leader, we simply ignore the AppendEntries RPC.
+        // NOTE: technically, this should never occur as non-leaders should not
+        // be issuing AppendEntries RPC calls.
+        // TODO: perhaps return an error here?
         if self.is_leader() {
             return None;
         }
@@ -483,11 +486,13 @@ impl RaftServer {
 
         assert_eq!(msg.term, self.current_term);
 
-        // If we're a candidate, we should return to the follower state upon
-        // receiving this RPC, and not respond to the message.
+        // If we're a candidate, we should return to the follower state.
         if self.is_candidate() {
             self.state = RaftState::Follower;
-            return None;
+            return Some(MessageAppendEntriesResponse {
+                term: self.current_term,
+                success: false,
+            });
         }
 
         // If we're not a candidate, we must be a follower as leaders ignore
@@ -565,7 +570,10 @@ impl RaftServer {
             // TODO: find a way to take ownership of `msg` and remove this
             // `clone`.
             self.log.push(msg.entries[0].clone());
-            return None;
+            return Some(MessageAppendEntriesResponse {
+                term: self.current_term,
+                success: true,
+            });
         }
 
         // If our log already contains an entry at the new index, it's
@@ -595,7 +603,11 @@ impl RaftServer {
         // When there's a conflict, we simply remove the last item in the log.
         let conflict_index = self.log.len();
         self.log.remove(conflict_index - 1);
-        None
+
+        Some(MessageAppendEntriesResponse {
+            term: self.current_term,
+            success: true,
+        })
     }
 
     /// Server receives an AppendEntries response from `peer` with `msg.term ==
