@@ -1326,18 +1326,15 @@ mod tests {
         // TODO: add these entries via an RPC call instead.
         raft.log.append(&mut vec![
             LogEntry((), 1),
-            LogEntry((), 2),
         ]);
-        raft.set_current_term(4);
+        raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
 
-        assert_eq!(aer.term, 4);
+        assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, vec![
             LogEntry((), 1),
             LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 4),
         ]);
     }
 
