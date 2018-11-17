@@ -27,9 +27,6 @@ impl LogEntry {
 pub enum ReceiveResult {
     /// A response with a stale term was received, and so must be dropped.
     DropStaleResponse,
-    /// An RPC request was processed, but it is not necessary to send a
-    /// response.
-    RequestProcessed,
     /// An RPC request was processed, a response was generated and must be sent.
     // TODO: enforce the invariant that ONLY response-type messages should be
     // returned here.
@@ -459,29 +456,24 @@ impl RaftServer {
     ///
     /// 1. `msg.term <= self.current_term` must always be true when this
     /// function is called.
+    /// 2. This function must never be called for a leader node.
     ///
     /// # Panics
     ///
     /// Panics if any invariants are violated.
     // TODO: ensure that only `msg.entries` of length `0` or `1` are handled.
-    fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> Option<MessageAppendEntriesResponse> {
+    fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
         // Assert the invariants.
         assert!(msg.term <= self.current_term);
-
-        // If we are a leader, we simply ignore the AppendEntries RPC.
-        // NOTE: technically, this should never occur as non-leaders should not
-        // be issuing AppendEntries RPC calls.
-        // TODO: perhaps return an error here?
-        if self.is_leader() {
-            return None;
-        }
+        // Non-leaders should not be issuing AppendEntries RPC calls.
+        assert!(!self.is_leader());
 
         // If `msg.term < self.current_term` we reject the request.
         if msg.term < self.current_term {
-            return Some(MessageAppendEntriesResponse {
+            return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-            });
+            };
         }
 
         assert_eq!(msg.term, self.current_term);
@@ -489,10 +481,10 @@ impl RaftServer {
         // If we're a candidate, we should return to the follower state.
         if self.is_candidate() {
             self.state = RaftState::Follower;
-            return Some(MessageAppendEntriesResponse {
+            return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-            });
+            };
         }
 
         // If we're not a candidate, we must be a follower as leaders ignore
@@ -511,10 +503,10 @@ impl RaftServer {
                         Some(entry) => entry,
                         // TODO: this should be unreachable?
                         None => {
-                            return Some(MessageAppendEntriesResponse {
+                            return MessageAppendEntriesResponse {
                                 term: self.current_term,
                                 success: false,
-                            });
+                            };
                         },
                     };
 
@@ -534,10 +526,10 @@ impl RaftServer {
         // If the previous log records (as outlined in the incoming message) do
         // not match our existing log history, we reject the request.
         if !log_ok {
-            return Some(MessageAppendEntriesResponse {
+            return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-            });
+            };
         }
 
         assert!(log_ok);
@@ -555,10 +547,10 @@ impl RaftServer {
             // process an old, duplicated request), but that doesn't affect
             // anything.
             self.commit_index = cmp::min(msg.leader_commit, self.log.len());
-            return Some(MessageAppendEntriesResponse {
+            return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: true,
-            });
+            };
         }
 
         assert!(!msg.entries.is_empty());
@@ -570,10 +562,10 @@ impl RaftServer {
             // TODO: find a way to take ownership of `msg` and remove this
             // `clone`.
             self.log.push(msg.entries[0].clone());
-            return Some(MessageAppendEntriesResponse {
+            return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: true,
-            });
+            };
         }
 
         // If our log already contains an entry at the new index, it's
@@ -591,10 +583,10 @@ impl RaftServer {
                 // process an old, duplicated request), but that doesn't affect
                 // anything.
                 self.commit_index = cmp::min(msg.leader_commit, self.log.len());
-                return Some(MessageAppendEntriesResponse {
+                return MessageAppendEntriesResponse {
                     term: self.current_term,
                     success: true,
-                });
+                };
             }
 
             assert!(entry.term() != msg.entries[0].term());
@@ -604,10 +596,10 @@ impl RaftServer {
         let conflict_index = self.log.len();
         self.log.remove(conflict_index - 1);
 
-        Some(MessageAppendEntriesResponse {
+        MessageAppendEntriesResponse {
             term: self.current_term,
             success: true,
-        })
+        }
     }
 
     /// Server receives an AppendEntries response from `peer` with `msg.term ==
@@ -763,9 +755,9 @@ impl RaftServer {
 
         use self::Message::*;
         match msg {
-            AppendEntries(msg) => match self.handle_append_entries_request(peer, msg) {
-                Some(response) => ReceiveResult::Response(Message::AppendEntriesResponse(response)),
-                None => ReceiveResult::RequestProcessed,
+            AppendEntries(msg) => {
+                let res = self.handle_append_entries_request(peer, msg);
+                ReceiveResult::Response(Message::AppendEntriesResponse(res))
             },
             AppendEntriesResponse(msg) => {
                 // Responses with stale items are ignored.
@@ -1015,7 +1007,7 @@ mod tests {
             leader_commit: 0,
         }));
         let res = raft1.handle_append_entries_request(&0, &req.unwrap());
-        raft.handle_append_entries_response(&1, &res.unwrap());
+        raft.handle_append_entries_response(&1, &res);
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 2)].iter().cloned().collect(),
             match_index: [(1, 0)].iter().cloned().collect(),
@@ -1047,7 +1039,7 @@ mod tests {
             leader_commit: 0,
         }));
         let res = raft1.handle_append_entries_request(&0, &req.unwrap());
-        raft.handle_append_entries_response(&1, &res.unwrap());
+        raft.handle_append_entries_response(&1, &res);
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 1)].iter().cloned().collect(),
             match_index: [(1, 0)].iter().cloned().collect(),
@@ -1258,7 +1250,7 @@ mod tests {
 
         // `current_term` is higher than `term`
         raft.set_current_term(5);
-        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+        let aer = raft.handle_append_entries_request(&1, &ae);
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, false);
     }
@@ -1280,7 +1272,7 @@ mod tests {
         raft.set_current_term(5);
 
         // `log` does not contain an entry at `prev_log_index`
-        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, false);
 
@@ -1288,7 +1280,7 @@ mod tests {
         // matches `prev_log_term`
         // TODO: add these entries via an RPC call instead.
         raft.log.push(LogEntry((), 3));
-        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, false);
     }
@@ -1317,7 +1309,7 @@ mod tests {
             LogEntry((), 3),
         ]);
         raft.set_current_term(5);
-        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         // NOTE: although the conflicting entry and all that follow it should be
         // be removed eventually, each conflicting AppendEntries RPC call will
@@ -1350,7 +1342,7 @@ mod tests {
             LogEntry((), 2),
         ]);
         raft.set_current_term(5);
-        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
@@ -1379,7 +1371,7 @@ mod tests {
             LogEntry((), 1),
         ]);
         raft.set_current_term(5);
-        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+        let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
