@@ -1309,6 +1309,36 @@ mod tests {
         ]);
     }
 
+    // New entry is already appended.
+    #[test]
+    fn test_raft_server_handle_append_entries_request_append_new_entries_already_done() {
+        let ae = MessageAppendEntries {
+            term: 5,
+            leader_id: 0,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
+            leader_commit: 0,
+        };
+
+        let mut raft = RaftServer::new(0);
+
+        // TODO: add these entries via an RPC call instead.
+        raft.log.append(&mut vec![
+            LogEntry((), 1),
+            LogEntry((), 2),
+        ]);
+        raft.set_current_term(5);
+        let aer = raft.handle_append_entries_request(&1, &ae).unwrap();
+
+        assert_eq!(aer.term, 5);
+        assert_eq!(aer.success, true);
+        assert_eq!(raft.log, vec![
+            LogEntry((), 1),
+            LogEntry((), 2),
+        ]);
+    }
+
     // Append any new entries not already in the log.
     #[test]
     fn test_raft_server_handle_append_entries_request_append_new_entries() {
