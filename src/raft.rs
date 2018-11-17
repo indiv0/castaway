@@ -549,7 +549,7 @@ impl RaftServer {
             // This could make our `commit_index` decrease (e.g. if we
             // process an old, duplicated request), but that doesn't affect
             // anything.
-            self.commit_index = msg.leader_commit;
+            self.commit_index = cmp::min(msg.leader_commit, self.log.len());
             return Some(MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: true,
@@ -582,7 +582,7 @@ impl RaftServer {
                 // This could make our `commit_index` decrease (e.g. if we
                 // process an old, duplicated request), but that doesn't affect
                 // anything.
-                self.commit_index = msg.leader_commit;
+                self.commit_index = cmp::min(msg.leader_commit, self.log.len());
                 return Some(MessageAppendEntriesResponse {
                     term: self.current_term,
                     success: true,
