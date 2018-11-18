@@ -404,6 +404,23 @@ impl RaftServer {
         }
     }
 
+    /// Node transitions to candidate.
+    ///
+    /// On conversion to candidate, start election.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server is currently in the candidate state.
+    fn become_candidate(&mut self, servers: &HashSet<Id>) {
+        if self.is_candidate() {
+            panic!("become_candidate called on candidate node");
+        }
+
+        self.state = RaftState::Candidate(CandidateState::default());
+
+        self.start_election(servers);
+    }
+
     /// Candidate transitions to leader.
     ///
     /// # Panics
@@ -1208,6 +1225,26 @@ mod tests {
 
         // server `state` is not leader.
         assert_eq!(raft.append_entries(&1), Err(AppendEntriesError::NotLeader));
+    }
+
+    /* `RaftServer::become_candidate` tests */
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_raft_server_become_candidate() {
+        let mut raft = RaftServer::new(0);
+
+        raft.become_candidate(&[0].iter().cloned().collect());
+        assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
+    }
+
+    #[test]
+    #[should_panic(expected = "become_candidate called on candidate node")]
+    fn test_raft_server_become_candidate_already_candidate() {
+        let mut raft = RaftServer::new(0);
+        raft.state = RaftState::Candidate(CandidateState::default());
+
+        raft.become_candidate(&[0].iter().cloned().collect());
     }
 
     /* `RaftServer::become_leader` tests */
