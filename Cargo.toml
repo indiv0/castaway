@@ -2,3 +2,6 @@
 name = "castaway"
 version = "0.1.0"
 authors = ["Nikita Pekin <contact@nikitapek.in>"]
+
+[dependencies]
+rand = "0.5.5"

@@ -1,8 +1,12 @@
 #![allow(dead_code, unused_variables)]
 
+use rand::{self, Rng};
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+
+// Randomized election timeout range, in milliseconds.
+const ELECTION_TIMEOUT_RANGE: (usize, usize) = (150, 300);
 
 type Id = usize;
 type Command = ();
@@ -234,6 +238,11 @@ pub struct RaftServer {
     id: Id,
     /// Raft state of this server (e.g. candidate/follower/leader).
     state: RaftState,
+
+    /// Elapsed time (in ms) since the current election began.
+    election_timer: usize,
+    /// Randomized election timeout.
+    election_timeout: usize,
 }
 
 impl RaftServer {
@@ -247,6 +256,8 @@ impl RaftServer {
             last_applied: 0,
             id,
             state: RaftState::Follower,
+            election_timer: 0,
+            election_timeout: 0,
         }
     }
 
@@ -268,6 +279,11 @@ impl RaftServer {
 
     fn set_state(&mut self, state: RaftState) {
         self.state = state;
+    }
+
+    /// Randomize the election timeout to be anywhere in the `ELECTION_TIMEOUT_RANGE`, inclusive.
+    fn randomize_election_timeout(&mut self) {
+        self.election_timeout = rand::thread_rng().gen_range(ELECTION_TIMEOUT_RANGE.0, ELECTION_TIMEOUT_RANGE.1 + 1);
     }
 
     /// Server restarts from stable storage.
@@ -831,6 +847,11 @@ impl RaftServer {
             _ => false,
         }
     }
+
+    /// Returns `true` is the randomized election timeout has elapsed.
+    fn is_election_timeout_elapsed(&self) -> bool {
+        self.election_timer >= self.election_timeout
+    }
 }
 
 /// Initializes a new, empty, replicated log.
@@ -893,6 +914,8 @@ mod tests {
         assert_eq!(raft.last_applied, 0);
 
         assert_eq!(raft.state, RaftState::Follower);
+
+        assert_eq!(raft.election_timeout, 0);
     }
 
     #[test]
@@ -912,6 +935,20 @@ mod tests {
         raft.set_state(RaftState::Leader(leader_state.clone()));
         assert_eq!(raft.state, RaftState::Leader(leader_state));
     }
+
+    /* `RaftServer::randomize_election_timeout` tests */
+
+    #[test]
+    fn test_raft_server_randomize_election_timeout() {
+        let mut raft = RaftServer::new(1);
+        let election_timeout = raft.election_timeout;
+
+        raft.randomize_election_timeout();
+        assert!(election_timeout != raft.election_timeout);
+        assert!(raft.election_timeout >= ELECTION_TIMEOUT_RANGE.0);
+        assert!(raft.election_timeout <= ELECTION_TIMEOUT_RANGE.1);
+    }
+
 
     /* `RaftServer::restart` tests */
 
@@ -1809,5 +1846,16 @@ mod tests {
         assert_eq!(sub_seq(&[0, 1, 2], 0, 10), &[0, 1, 2]);
         assert_eq!(sub_seq(&[0, 1, 2], 1, 0), &[]);
         assert_eq!(sub_seq(&[0, 1, 2], 5, 0), &[]);
+    }
+
+    #[test]
+    fn test_is_election_timeout_elapsed() {
+        let mut raft = RaftServer::new(0);
+
+        raft.election_timer = 100;
+        raft.election_timeout = 150;
+        assert!(!raft.is_election_timeout_elapsed());
+        raft.election_timer = 200;
+        assert!(raft.is_election_timeout_elapsed());
     }
 }
