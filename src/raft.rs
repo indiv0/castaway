@@ -842,6 +842,24 @@ impl RaftServer {
         }
     }
 
+    /// Periodic function which runs election tasks.
+    pub fn periodic(&mut self, ms_since_last_period: usize, servers: &HashSet<Id>) {
+        self.election_timer += ms_since_last_period;
+
+        match self.state {
+            // If a follower receives no communication over a period of time
+            // called the *election timeout*, then it assumes there is no
+            // viable leader and begins an election to choose a new leader.
+            RaftState::Follower => {
+                if self.is_election_timeout_elapsed() && self.voted_for().is_none() {
+                    self.become_candidate(servers);
+                }
+            },
+            RaftState::Candidate(ref state) => unimplemented!(),
+            RaftState::Leader(ref state) => unimplemented!(),
+        }
+    }
+
     /// Start a new election.
     ///
     /// To start an election:
@@ -1919,6 +1937,35 @@ mod tests {
 
         assert_eq!(raft.receive(&1, &rvr), ReceiveResult::DropStaleResponse);
         assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
+    }
+
+    /* `RaftServer::periodic` tests */
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_raft_server_periodic_follower_election_timeout_elapses() {
+        let mut raft = RaftServer::new(0);
+        let servers = [0].iter().cloned().collect();
+
+        raft.election_timer = 0;
+        raft.election_timeout = 150;
+        assert!(raft.is_follower());
+        raft.periodic(200, &servers);
+        assert!(raft.is_candidate());
+    }
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_raft_server_periodic_follower_election_timeout_elapses_vote_already_granted() {
+        let mut raft = RaftServer::new(0);
+        let servers = [0, 1].iter().cloned().collect();
+
+        raft.set_voted_for(Some(1));
+        raft.election_timer = 0;
+        raft.election_timeout = 150;
+        assert!(raft.is_follower());
+        raft.periodic(200, &servers);
+        assert!(raft.is_follower());
     }
 
     /* `RaftServer::start_election` tests */
