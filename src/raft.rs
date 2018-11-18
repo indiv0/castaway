@@ -133,6 +133,22 @@ impl CandidateState {
             votes_granted,
         }
     }
+
+    /// Add a received vote to the candidate's state.
+    ///
+    /// # Invariants
+    ///
+    /// 1. Should only be called if `peer` has not already responded during the
+    ///    current election.
+    // TODO: is the above invariant necessary?
+    fn receive_vote(&mut self, peer: Id, granted: bool) {
+        let not_already_responded = self.votes_responded.insert(peer);
+        assert!(not_already_responded);
+        if granted {
+            let not_already_granted = self.votes_granted.insert(peer);
+            assert!(not_already_granted);
+        }
+    }
 }
 
 impl Default for CandidateState {
@@ -742,21 +758,8 @@ impl RaftServer {
         assert!(msg.term == self.current_term);
 
         // Mark `peer` as having responded to our RequestVote RPC.
-        match self.state {
-            RaftState::Candidate(ref mut state) => {
-                let not_present = state.votes_responded.insert(*peer);
-                // The vote MUST not have already been present.
-                assert!(not_present);
-
-                // If `peer` granted the candidate their vote, add it to the
-                // list.
-                if msg.vote_granted {
-                    let not_present = state.votes_granted.insert(*peer);
-                    // The vote MUST not have already been present.
-                    assert!(not_present);
-                }
-            },
-            _ => {},
+        if let RaftState::Candidate(ref mut state) = self.state {
+            state.receive_vote(*peer, msg.vote_granted);
         }
     }
 
@@ -903,6 +906,31 @@ mod tests {
             votes_responded: HashSet::new(),
             votes_granted: HashSet::new(),
         });
+    }
+
+    /* `CandidateState::receive_vote` tests */
+
+    #[test]
+    fn test_candidate_state_receive_vote() {
+        let mut state = CandidateState::default();
+
+        state.receive_vote(1, false);
+        assert!(state.votes_responded.contains(&1));
+        assert!(!state.votes_granted.contains(&1));
+        state.receive_vote(2, true);
+        assert!(state.votes_responded.contains(&2));
+        assert!(state.votes_granted.contains(&2));
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: not_already_responded")]
+    fn test_candidate_state_receive_vote_already_responded() {
+        let mut state = CandidateState {
+            votes_responded: [1].iter().cloned().collect(),
+            ..Default::default()
+        };
+
+        state.receive_vote(1, false);
     }
 
     #[test]
