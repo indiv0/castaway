@@ -150,6 +150,16 @@ struct LeaderState {
     match_index: HashMap<Id, usize>,
 }
 
+impl LeaderState {
+    /// Initialize a new `LeaderState`.
+    fn new() -> Self {
+        Self {
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+        }
+    }
+}
+
 /// Errors which may occur when attempting to send a RequestVote request.
 #[derive(Debug, PartialEq)]
 pub enum RequestVoteError {
@@ -897,10 +907,7 @@ mod tests {
     fn test_raft_server_set_state() {
         let mut raft = RaftServer::new(0);
 
-        let leader_state = LeaderState {
-            match_index: HashMap::new(),
-            next_index: HashMap::new(),
-        };
+        let leader_state = LeaderState::new();
         assert_eq!(raft.state, RaftState::Follower);
         raft.set_state(RaftState::Leader(leader_state.clone()));
         assert_eq!(raft.state, RaftState::Leader(leader_state));
@@ -944,10 +951,7 @@ mod tests {
     #[test]
     fn test_raft_server_timeout_leader() {
         let mut raft = RaftServer::new(0);
-        raft.state = RaftState::Leader(LeaderState {
-            next_index: HashMap::new(),
-            match_index: HashMap::new(),
-        });
+        raft.state = RaftState::Leader(LeaderState::new());
 
         assert_eq!(raft.timeout(), Err(TimeoutError::IsLeader));
     }
@@ -1130,10 +1134,7 @@ mod tests {
         let mut raft = RaftServer::new(0);
 
         // `state` is `Leader`
-        raft.state = RaftState::Leader(LeaderState {
-            next_index: HashMap::new(),
-            match_index: HashMap::new(),
-        });
+        raft.state = RaftState::Leader(LeaderState::new());
         raft.become_leader(&HashSet::new());
     }
 
@@ -1153,10 +1154,7 @@ mod tests {
     fn test_raft_server_client_request() {
         let mut raft = RaftServer::new(0);
         raft.current_term = 3;
-        raft.state = RaftState::Leader(LeaderState {
-            next_index: HashMap::new(),
-            match_index: HashMap::new(),
-        });
+        raft.state = RaftState::Leader(LeaderState::new());
 
         assert_eq!(raft.client_request(()), Ok(()));
         assert_eq!(raft.log, vec![LogEntry((), 3)]);
@@ -1716,10 +1714,7 @@ mod tests {
         let mut raft = RaftServer::new(0);
         // `current_term` is less than `term`.
         raft.current_term = 1;
-        raft.state = RaftState::Leader(LeaderState {
-            next_index: HashMap::new(),
-            match_index: HashMap::new(),
-        });
+        raft.state = RaftState::Leader(LeaderState::new());
         raft.voted_for = Some(1);
 
         raft.update_term(&1, &rvr);
