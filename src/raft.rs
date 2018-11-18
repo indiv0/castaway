@@ -121,6 +121,22 @@ struct CandidateState {
     votes_granted: HashSet<Id>,
 }
 
+impl CandidateState {
+    /// Initialize a new `CandidateState`.
+    fn new(votes_responded: HashSet<Id>, votes_granted: HashSet<Id>) -> Self {
+        Self {
+            votes_responded,
+            votes_granted,
+        }
+    }
+}
+
+impl Default for CandidateState {
+    fn default() -> Self {
+        Self::new(HashSet::new(), HashSet::new())
+    }
+}
+
 /// Volatile state on leader nodes.
 #[derive(Clone, Debug, PartialEq)]
 struct LeaderState {
@@ -257,10 +273,7 @@ impl RaftServer {
             return Err(TimeoutError::IsLeader);
         }
 
-        self.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        self.state = RaftState::Candidate(CandidateState::default());
         self.current_term += 1;
         // TODO: consider messaging localhost for setting the local vote, as
         // opposed to doing it atomically.
@@ -854,6 +867,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_candidate_state_new() {
+        assert_eq!(CandidateState::default(), CandidateState {
+            votes_responded: HashSet::new(),
+            votes_granted: HashSet::new(),
+        });
+    }
+
+    #[test]
     fn test_raft_server_new() {
         let raft = RaftServer::new(0);
         // Term and index values MUST be initialized to 0 on first boot.
@@ -893,10 +914,7 @@ mod tests {
         raft.current_term = 1;
         raft.voted_for = Some(3);
         raft.log.append(&mut vec![LogEntry((), 1)]);
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
         raft.commit_index = 2;
 
         raft.restart();
@@ -918,10 +936,7 @@ mod tests {
         raft.voted_for = Some(1);
 
         assert_eq!(raft.timeout(), Ok(()));
-        assert_eq!(raft.state, RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        }));
+        assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
         assert_eq!(raft.current_term, 1);
         assert_eq!(raft.voted_for, None);
     }
@@ -948,10 +963,7 @@ mod tests {
             LogEntry((), 1),
             LogEntry((), 4),
         ]);
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
 
         assert_eq!(raft.request_vote(&1), Ok(MessageRequestVote {
             term: 5,
@@ -973,7 +985,7 @@ mod tests {
         let mut raft = RaftServer::new(0);
         raft.state = RaftState::Candidate(CandidateState {
             votes_responded: [1].iter().cloned().collect(),
-            votes_granted: HashSet::new(),
+            ..Default::default()
         });
 
         assert_eq!(raft.request_vote(&1), Err(RequestVoteError::AlreadyResponded));
@@ -1643,10 +1655,7 @@ mod tests {
         let mut raft = RaftServer::new(0);
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
 
         assert_eq!(rvr.term, raft.current_term);
         raft.handle_request_vote_response(&1, &rvr);
@@ -1668,17 +1677,14 @@ mod tests {
         let mut raft = RaftServer::new(0);
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
 
         assert_eq!(rvr.term, raft.current_term);
         raft.handle_request_vote_response(&1, &rvr);
         assert_eq!(raft.state,
             RaftState::Candidate(CandidateState {
                 votes_responded: [1].iter().cloned().collect(),
-                votes_granted: HashSet::new(),
+                ..Default::default()
             })
         );
     }
@@ -1734,10 +1740,7 @@ mod tests {
         });
 
         let mut raft = RaftServer::new(0);
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
         // `current_term` is less than `term`.
         raft.current_term = 1;
 
@@ -1754,16 +1757,13 @@ mod tests {
         });
 
         let mut raft = RaftServer::new(0);
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
         raft.current_term = 2;
 
         assert_eq!(raft.receive(&1, &rvr), ReceiveResult::ResponseProcessed);
         assert_eq!(raft.state, RaftState::Candidate(CandidateState {
             votes_responded: [1].iter().cloned().collect(),
-            votes_granted: HashSet::new(),
+            ..Default::default()
         }));
     }
 
@@ -1775,18 +1775,12 @@ mod tests {
         });
 
         let mut raft = RaftServer::new(0);
-        raft.state = RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        });
+        raft.state = RaftState::Candidate(CandidateState::default());
         // `current_term` is greater than `term`.
         raft.current_term = 2;
 
         assert_eq!(raft.receive(&1, &rvr), ReceiveResult::DropStaleResponse);
-        assert_eq!(raft.state, RaftState::Candidate(CandidateState {
-            votes_responded: HashSet::new(),
-            votes_granted: HashSet::new(),
-        }));
+        assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
     }
 
     /* Helper tests */
