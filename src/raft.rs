@@ -825,6 +825,47 @@ impl RaftServer {
         }
     }
 
+    /// Start a new election.
+    ///
+    /// To start an election:
+    /// * Increment `current_term`
+    /// * Vote for self
+    /// * Reset election timer
+    /// * Send RequestVote RPCs to all other servers
+    ///
+    /// # Invariants
+    ///
+    /// 1. Only candidates may start an election.
+    /// 2. Callbacks must have been registered via `RaftServer::register_callbacks`.
+    fn start_election(&mut self, servers: &HashSet<Id>) {
+        assert!(self.is_candidate());
+
+        self.current_term += 1;
+
+        match self.state {
+            RaftState::Candidate(ref mut state) => state.receive_vote(self.id, true),
+            _ => unreachable!(),
+        }
+
+        self.election_timer = 0;
+
+        // Generate vote requests for each server that has yet to vote.
+        let vote_requests = servers.iter()
+            .map(|server| self.request_vote(server))
+            .flat_map(|res| match res {
+                Ok(msg) => Some(msg),
+                // Per invariant #1, this should never be the case.
+                Err(RequestVoteError::NotCandidate) => unreachable!(),
+                // NOTE: in theory, this should be the case for only the present
+                // server, as the election has just begun and no vote requests
+                // have been issued yet.
+                Err(RequestVoteError::AlreadyResponded) => None,
+            })
+            .collect::<Vec<MessageRequestVote>>();
+
+        unimplemented!();
+    }
+
     /* Helpers */
 
     /// Returns `true` if the server is in the candidate state.
@@ -1841,6 +1882,35 @@ mod tests {
 
         assert_eq!(raft.receive(&1, &rvr), ReceiveResult::DropStaleResponse);
         assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
+    }
+
+    /* `RaftServer::start_election` tests */
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_raft_server_start_election() {
+        let mut raft = RaftServer::new(0);
+
+        raft.state = RaftState::Candidate(CandidateState::default());
+        raft.election_timer = 10;
+        raft.set_current_term(5);
+        raft.start_election(&[0].iter().cloned().collect());
+        assert_eq!(raft.current_term, 6);
+        assert_eq!(raft.state, RaftState::Candidate(CandidateState {
+            votes_responded: [0].iter().cloned().collect(),
+            votes_granted: [0].iter().cloned().collect(),
+        }));
+        assert_eq!(raft.election_timer, 0);
+
+        // TODO: test that vote request callback is issued correctly.
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: self.is_candidate()")]
+    fn test_raft_server_start_election_is_not_candidate() {
+        let mut raft = RaftServer::new(0);
+
+        raft.start_election(&[0].iter().cloned().collect());
     }
 
     /* Helper tests */
