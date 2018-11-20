@@ -8,7 +8,7 @@ use std::hash::Hash;
 // Randomized election timeout range, in milliseconds.
 const ELECTION_TIMEOUT_RANGE: (usize, usize) = (150, 300);
 
-type Id = usize;
+pub type Id = usize;
 type Command = ();
 type Term = usize;
 /// An individual log entry.
@@ -259,11 +259,14 @@ pub struct RaftServer {
     election_timer: usize,
     /// Randomized election timeout.
     election_timeout: usize,
+
+    /// Server data for each Raft node.
+    servers: HashSet<Id>,
 }
 
 impl RaftServer {
     /// Instantiate a new Raft server.
-    pub fn new(id: Id) -> Self {
+    pub fn new(id: Id, servers: HashSet<Id>) -> Self {
         Self {
             current_term: 0,
             voted_for: None,
@@ -274,6 +277,7 @@ impl RaftServer {
             state: RaftState::Follower,
             election_timer: 0,
             election_timeout: 0,
+            servers,
         }
     }
 
@@ -411,14 +415,14 @@ impl RaftServer {
     /// # Panics
     ///
     /// Panics if the server is currently in the candidate state.
-    fn become_candidate(&mut self, servers: &HashSet<Id>) {
+    fn become_candidate(&mut self) {
         if self.is_candidate() {
             panic!("become_candidate called on candidate node");
         }
 
         self.state = RaftState::Candidate(CandidateState::default());
 
-        self.start_election(servers);
+        self.start_election();
     }
 
     /// Candidate transitions to leader.
@@ -427,21 +431,21 @@ impl RaftServer {
     ///
     /// Panics if the server is not currently in the candidate state.
     /// Panics if the server does not have enough votes to form a quorum.
-    pub fn become_leader(&mut self, servers: &HashSet<Id>) {
+    pub fn become_leader(&mut self) {
         {
             let state = match self.state {
                 RaftState::Candidate(ref state) => state,
                 _ => panic!("become_leader called on non-candidate node"),
             };
 
-            if !is_quorum(&state.votes_granted, servers) {
+            if !is_quorum(&state.votes_granted, &self.servers) {
                 panic!("insufficient votes for quorum");
             }
         }
 
         self.state = RaftState::Leader(LeaderState {
-            next_index: servers.iter().cloned().map(|s| (s, self.log.len() + 1)).collect(),
-            match_index: servers.iter().cloned().map(|s| (s, 0)).collect(),
+            next_index: self.servers.iter().cloned().map(|s| (s, self.log.len() + 1)).collect(),
+            match_index: self.servers.iter().cloned().map(|s| (s, 0)).collect(),
         });
     }
 
@@ -471,7 +475,7 @@ impl RaftServer {
     /// be found.
     // TODO: perhaps iterate over the keys of `self.state.match_index` instead
     // of passing in a server list?
-    fn advance_commit_index(&mut self, servers: &HashSet<Id>) -> Result<(), AdvanceCommitIndexError> {
+    fn advance_commit_index(&mut self) -> Result<(), AdvanceCommitIndexError> {
         if !self.is_leader() {
             return Err(AdvanceCommitIndexError::NotLeader);
         }
@@ -491,7 +495,7 @@ impl RaftServer {
                         .filter(|(&id, &m)| id == self.id || m >= idx)
                         .map(|(&id, _)| id)
                         .collect();
-                    is_quorum(&agree_servers, servers)
+                    is_quorum(&agree_servers, &self.servers)
                 });
             if let Some(max_agree_index) = agree_indices.max() {
                 let term = match self.log.get(max_agree_index - 1) {
@@ -843,7 +847,7 @@ impl RaftServer {
     }
 
     /// Periodic function which runs election tasks.
-    pub fn periodic(&mut self, ms_since_last_period: usize, servers: &HashSet<Id>) {
+    pub fn periodic(&mut self, ms_since_last_period: usize) {
         self.election_timer += ms_since_last_period;
 
         match self.state {
@@ -852,7 +856,7 @@ impl RaftServer {
             // viable leader and begins an election to choose a new leader.
             RaftState::Follower => {
                 if self.is_election_timeout_elapsed() && self.voted_for().is_none() {
-                    self.become_candidate(servers);
+                    self.become_candidate();
                 }
             },
             RaftState::Candidate(ref state) => unimplemented!(),
@@ -872,7 +876,7 @@ impl RaftServer {
     ///
     /// 1. Only candidates may start an election.
     /// 2. Callbacks must have been registered via `RaftServer::register_callbacks`.
-    fn start_election(&mut self, servers: &HashSet<Id>) {
+    fn start_election(&mut self) {
         assert!(self.is_candidate());
 
         self.current_term += 1;
@@ -885,7 +889,7 @@ impl RaftServer {
         self.election_timer = 0;
 
         // Generate vote requests for each server that has yet to vote.
-        let vote_requests = servers.iter()
+        let vote_requests = self.servers.clone().iter()
             .map(|server| self.request_vote(server))
             .flat_map(|res| match res {
                 Ok(msg) => Some(msg),
@@ -976,6 +980,10 @@ fn sub_seq<T>(s: &[T], m: usize, n: usize) -> &[T] {
 mod tests {
     use super::*;
 
+    fn init_single_server() -> RaftServer {
+        RaftServer::new(0, [0].iter().cloned().collect())
+    }
+
     #[test]
     fn test_candidate_state_new() {
         assert_eq!(CandidateState::default(), CandidateState {
@@ -1011,7 +1019,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_new() {
-        let raft = RaftServer::new(0);
+        let raft = init_single_server();
         // Term and index values MUST be initialized to 0 on first boot.
         assert_eq!(raft.current_term, 0);
         assert_eq!(raft.commit_index, 0);
@@ -1024,7 +1032,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_set_current_term() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         assert_eq!(raft.current_term, 0);
         raft.set_current_term(5);
         assert_eq!(raft.current_term, 5);
@@ -1032,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_set_state() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         let leader_state = LeaderState::new();
         assert_eq!(raft.state, RaftState::Follower);
@@ -1044,7 +1052,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_randomize_election_timeout() {
-        let mut raft = RaftServer::new(1);
+        let mut raft = init_single_server();
         let election_timeout = raft.election_timeout;
 
         raft.randomize_election_timeout();
@@ -1058,7 +1066,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_restart() {
-        let mut raft = RaftServer::new(1);
+        let mut raft = RaftServer::new(1, [0, 1, 2, 3].iter().cloned().collect());
         raft.current_term = 1;
         raft.voted_for = Some(3);
         raft.log.append(&mut vec![LogEntry((), 1)]);
@@ -1078,7 +1086,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_timeout() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Follower;
         raft.current_term = 0;
         raft.voted_for = Some(1);
@@ -1091,7 +1099,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_timeout_leader() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Leader(LeaderState::new());
 
         assert_eq!(raft.timeout(), Err(TimeoutError::IsLeader));
@@ -1101,7 +1109,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_request_vote() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.current_term = 5;
         raft.log.append(&mut vec![
             LogEntry((), 1),
@@ -1120,14 +1128,14 @@ mod tests {
 
     #[test]
     fn test_raft_server_request_vote_not_candidate() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         assert_eq!(raft.request_vote(&1), Err(RequestVoteError::NotCandidate));
     }
 
     #[test]
     fn test_raft_server_request_vote_already_voted() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Candidate(CandidateState {
             votes_responded: [1].iter().cloned().collect(),
             ..Default::default()
@@ -1140,7 +1148,8 @@ mod tests {
 
     #[test]
     fn test_raft_server_append_entries_two_missing() {
-        let mut raft = RaftServer::new(0);
+        let servers: HashSet<Id> = [0, 1].iter().cloned().collect();
+        let mut raft = RaftServer::new(0, servers.clone());
         raft.log.append(&mut vec![
             LogEntry((), 1),
             LogEntry((), 2),
@@ -1151,7 +1160,7 @@ mod tests {
             match_index: [(1, 0)].iter().cloned().collect(),
         });
 
-        let mut raft1 = RaftServer::new(1);
+        let mut raft1 = RaftServer::new(1, servers);
         raft1.current_term = 5;
 
         let req = raft.append_entries(&1);
@@ -1173,7 +1182,8 @@ mod tests {
 
     #[test]
     fn test_raft_server_append_entries_one_missing() {
-        let mut raft = RaftServer::new(0);
+        let servers: HashSet<Id> = [0, 1].iter().cloned().collect();
+        let mut raft = RaftServer::new(0, servers.clone());
         raft.log.append(&mut vec![
             LogEntry((), 1),
         ]);
@@ -1183,7 +1193,7 @@ mod tests {
             match_index: [(1, 0)].iter().cloned().collect(),
         });
 
-        let mut raft1 = RaftServer::new(1);
+        let mut raft1 = RaftServer::new(1, servers);
         raft1.current_term = 5;
 
         let req = raft.append_entries(&1);
@@ -1206,7 +1216,7 @@ mod tests {
     // TODO: ensure we follow heartbeat behaviour (§5.2).
     #[test]
     fn test_raft_server_append_entries_heartbeat() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.log.append(&mut vec![
             LogEntry((), 1),
             LogEntry((), 2),
@@ -1231,7 +1241,7 @@ mod tests {
     // TODO: validate that the ID is also in the list of available peers.
     #[test]
     fn test_raft_server_append_entries_invalid_peer() {
-        let raft = RaftServer::new(0);
+        let raft = init_single_server();
 
         // Peer `id` is the same ID as the issuing server.
         assert_eq!(raft.append_entries(&0), Err(AppendEntriesError::InvalidPeer));
@@ -1239,7 +1249,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_append_entries_not_leader() {
-        let raft = RaftServer::new(0);
+        let raft = init_single_server();
 
         // server `state` is not leader.
         assert_eq!(raft.append_entries(&1), Err(AppendEntriesError::NotLeader));
@@ -1250,19 +1260,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_become_candidate() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
-        raft.become_candidate(&[0].iter().cloned().collect());
+        raft.become_candidate();
         assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
     }
 
     #[test]
     #[should_panic(expected = "become_candidate called on candidate node")]
     fn test_raft_server_become_candidate_already_candidate() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Candidate(CandidateState::default());
 
-        raft.become_candidate(&[0].iter().cloned().collect());
+        raft.become_candidate();
     }
 
     /* `RaftServer::become_leader` tests */
@@ -1270,8 +1280,7 @@ mod tests {
     #[test]
     fn test_raft_server_become_leader() {
         let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
-
-        let mut raft = RaftServer::new(0);
+        let mut raft = RaftServer::new(0, servers);
         raft.state = RaftState::Candidate(CandidateState {
             votes_responded: [0, 1, 2, 3].iter().cloned().collect(),
             votes_granted: [0, 1, 2].iter().cloned().collect(),
@@ -1282,7 +1291,7 @@ mod tests {
             LogEntry((), 3),
         ]);
 
-        raft.become_leader(&servers);
+        raft.become_leader();
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)].iter().cloned().collect(),
             match_index: [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)].iter().cloned().collect(),
@@ -1292,28 +1301,28 @@ mod tests {
     #[test]
     #[should_panic(expected = "become_leader called on non-candidate node")]
     fn test_raft_server_become_leader_panic_already_leader() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `state` is `Leader`
         raft.state = RaftState::Leader(LeaderState::new());
-        raft.become_leader(&HashSet::new());
+        raft.become_leader();
     }
 
     #[test]
     #[should_panic(expected = "become_leader called on non-candidate node")]
     fn test_raft_server_become_leader_panic_state_is_follower() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `state` is `Follower`
         raft.state = RaftState::Follower;
-        raft.become_leader(&HashSet::new());
+        raft.become_leader();
     }
 
     /* `RaftServer::client_request` tests */
 
     #[test]
     fn test_raft_server_client_request() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.current_term = 3;
         raft.state = RaftState::Leader(LeaderState::new());
 
@@ -1323,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_raft_server_client_request_not_leader() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `state` is `Follower`
         raft.state = RaftState::Follower;
@@ -1335,7 +1344,7 @@ mod tests {
     #[test]
     fn test_raft_server_advance_commit_index() {
         let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
-        let mut raft = RaftServer::new(0);
+        let mut raft = RaftServer::new(0, servers);
         raft.commit_index = 1;
         raft.current_term = 3;
         raft.log.append(&mut vec![
@@ -1350,14 +1359,14 @@ mod tests {
             match_index: [(1, 5), (2, 3), (3, 3), (4, 0)].iter().cloned().collect(),
         });
 
-        assert_eq!(raft.advance_commit_index(&servers), Ok(()));
+        assert_eq!(raft.advance_commit_index(), Ok(()));
         assert_eq!(raft.commit_index, 3);
     }
 
     #[test]
     fn test_raft_server_advance_commit_index_not_matching_term() {
         let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
-        let mut raft = RaftServer::new(0);
+        let mut raft = RaftServer::new(0, servers);
         raft.commit_index = 1;
         // Majority of servers agree on index 3, but `log[3].term !=
         // self.current_term`.
@@ -1374,24 +1383,24 @@ mod tests {
             match_index: [(1, 5), (2, 3), (3, 3), (4, 0)].iter().cloned().collect(),
         });
 
-        assert_eq!(raft.advance_commit_index(&servers), Ok(()));
+        assert_eq!(raft.advance_commit_index(), Ok(()));
         assert_eq!(raft.commit_index, 1);
     }
 
     #[test]
     fn test_raft_server_advance_commit_index_not_leader() {
         let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
-        let mut raft = RaftServer::new(0);
+        let mut raft = RaftServer::new(0, servers);
 
         // `state` is `Follower`
         raft.state = RaftState::Follower;
-        assert_eq!(raft.advance_commit_index(&servers), Err(AdvanceCommitIndexError::NotLeader));
+        assert_eq!(raft.advance_commit_index(), Err(AdvanceCommitIndexError::NotLeader));
     }
 
     #[test]
     fn test_raft_server_advance_commit_index_no_quorum() {
         let servers = [0, 1, 2, 3, 4].iter().cloned().collect();
-        let mut raft = RaftServer::new(0);
+        let mut raft = RaftServer::new(0, servers);
         raft.commit_index = 1;
         raft.state = RaftState::Leader(LeaderState {
             next_index: HashMap::new(),
@@ -1399,7 +1408,7 @@ mod tests {
             match_index: [(1, 5), (2, 3), (3, 0), (4, 0)].iter().cloned().collect(),
         });
 
-        assert_eq!(raft.advance_commit_index(&servers), Ok(()));
+        assert_eq!(raft.advance_commit_index(), Ok(()));
         assert_eq!(raft.commit_index, 1);
     }
 
@@ -1417,7 +1426,7 @@ mod tests {
             leader_commit: 0,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `current_term` is higher than `term`
         raft.set_current_term(5);
@@ -1439,7 +1448,7 @@ mod tests {
             leader_commit: 0,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.set_current_term(5);
 
         // `log` does not contain an entry at `prev_log_index`
@@ -1469,7 +1478,7 @@ mod tests {
             leader_commit: 0,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // Existing entry conflicts with a new one.
         // TODO: add these entries via an RPC call instead.
@@ -1505,7 +1514,7 @@ mod tests {
             leader_commit: 0,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // TODO: add these entries via an RPC call instead.
         raft.log.append(&mut vec![
@@ -1535,7 +1544,7 @@ mod tests {
             leader_commit: 0,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // TODO: add these entries via an RPC call instead.
         raft.log.append(&mut vec![
@@ -1570,7 +1579,7 @@ mod tests {
             leader_commit: 3,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.set_current_term(5);
 
         // `leader_commit` is greater than `commit_index`, and less than index
@@ -1606,7 +1615,7 @@ mod tests {
             success: true,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `current_term` is not equal to `term`
         raft.set_current_term(0);
@@ -1620,7 +1629,7 @@ mod tests {
             success: true,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.set_current_term(1);
         raft.log.append(&mut vec![
             LogEntry((), 1),
@@ -1651,7 +1660,7 @@ mod tests {
             success: false,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.set_current_term(1);
         raft.log.append(&mut vec![
             LogEntry((), 1),
@@ -1687,7 +1696,7 @@ mod tests {
             last_log_term: 5,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `current_term` is higher than `term`
         raft.set_current_term(5);
@@ -1711,7 +1720,7 @@ mod tests {
             last_log_term: 5,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `voted_for` does not match `candidate_id`
         raft.voted_for = Some(3);
@@ -1731,7 +1740,7 @@ mod tests {
             last_log_term: 3,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
@@ -1772,7 +1781,7 @@ mod tests {
             last_log_term: 3,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
@@ -1797,7 +1806,7 @@ mod tests {
             vote_granted: true,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         // `current_term` is not equal to `term`
         raft.set_current_term(0);
@@ -1811,7 +1820,7 @@ mod tests {
             vote_granted: true,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
         raft.state = RaftState::Candidate(CandidateState::default());
@@ -1833,7 +1842,7 @@ mod tests {
             vote_granted: false,
         };
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
         raft.state = RaftState::Candidate(CandidateState::default());
@@ -1858,7 +1867,7 @@ mod tests {
             vote_granted: false,
         });
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         // `current_term` is greater than `term`.
         raft.current_term = 2;
 
@@ -1872,7 +1881,7 @@ mod tests {
             vote_granted: false,
         });
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         // `current_term` is less than `term`.
         raft.current_term = 1;
         raft.state = RaftState::Leader(LeaderState::new());
@@ -1895,7 +1904,7 @@ mod tests {
             vote_granted: false,
         });
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Candidate(CandidateState::default());
         // `current_term` is less than `term`.
         raft.current_term = 1;
@@ -1912,7 +1921,7 @@ mod tests {
             vote_granted: false,
         });
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Candidate(CandidateState::default());
         raft.current_term = 2;
 
@@ -1930,7 +1939,7 @@ mod tests {
             vote_granted: false,
         });
 
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
         raft.state = RaftState::Candidate(CandidateState::default());
         // `current_term` is greater than `term`.
         raft.current_term = 2;
@@ -1944,27 +1953,26 @@ mod tests {
     #[test]
     #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_periodic_follower_election_timeout_elapses() {
-        let mut raft = RaftServer::new(0);
-        let servers = [0].iter().cloned().collect();
+        let mut raft = init_single_server();
 
         raft.election_timer = 0;
         raft.election_timeout = 150;
         assert!(raft.is_follower());
-        raft.periodic(200, &servers);
+        raft.periodic(200);
         assert!(raft.is_candidate());
     }
 
     #[test]
     #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_periodic_follower_election_timeout_elapses_vote_already_granted() {
-        let mut raft = RaftServer::new(0);
-        let servers = [0, 1].iter().cloned().collect();
+        let servers: HashSet<Id> = [0, 1].iter().cloned().collect();
+        let mut raft = RaftServer::new(0, servers.clone());
 
         raft.set_voted_for(Some(1));
         raft.election_timer = 0;
         raft.election_timeout = 150;
         assert!(raft.is_follower());
-        raft.periodic(200, &servers);
+        raft.periodic(200);
         assert!(raft.is_follower());
     }
 
@@ -1973,12 +1981,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_start_election() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         raft.state = RaftState::Candidate(CandidateState::default());
         raft.election_timer = 10;
         raft.set_current_term(5);
-        raft.start_election(&[0].iter().cloned().collect());
+        raft.start_election();
         assert_eq!(raft.current_term, 6);
         assert_eq!(raft.state, RaftState::Candidate(CandidateState {
             votes_responded: [0].iter().cloned().collect(),
@@ -1992,9 +2000,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "assertion failed: self.is_candidate()")]
     fn test_raft_server_start_election_is_not_candidate() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
-        raft.start_election(&[0].iter().cloned().collect());
+        raft.start_election();
     }
 
     /* Helper tests */
@@ -2032,7 +2040,7 @@ mod tests {
 
     #[test]
     fn test_is_election_timeout_elapsed() {
-        let mut raft = RaftServer::new(0);
+        let mut raft = init_single_server();
 
         raft.election_timer = 100;
         raft.election_timeout = 150;

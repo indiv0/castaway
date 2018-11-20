@@ -1,13 +1,16 @@
 extern crate castaway;
 
-use castaway::{Message, RaftServer, ReceiveResult};
+use std::collections::HashSet;
+use castaway::{Id, Message, RaftServer, ReceiveResult};
 
 #[test]
 fn test_leader_election() {
-    let server_ids = 0..5;
-    let mut servers: Vec<_> = server_ids.clone()
-        .map(|id| RaftServer::new(id))
-        .collect();
+    let mut servers: Vec<RaftServer> = {
+        let server_ids: HashSet<Id> = (0..5).collect();
+        (0..5).clone()
+            .map(|id| RaftServer::new(id, server_ids.clone()))
+            .collect()
+    };
 
     servers[0].timeout().unwrap();
     assert!(servers[0].is_candidate());
@@ -55,6 +58,6 @@ fn test_leader_election() {
 
 
     // TODO: enforce the invariant that we *must* call this eventually.
-    servers[0].become_leader(&server_ids.clone().collect());
+    servers[0].become_leader();
     assert!(servers[0].is_leader());
 }

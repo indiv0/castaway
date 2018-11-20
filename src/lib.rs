@@ -2,4 +2,4 @@ extern crate rand;
 
 mod raft;
 
-pub use raft::{Message, RaftServer, ReceiveResult};
+pub use raft::{Id, Message, RaftServer, ReceiveResult};
