@@ -516,6 +516,8 @@ impl RaftServer {
 
     /* Message handlers */
 
+    // FIXME: update this documentation to reflect the fact that term updating
+    // is now handled as part of this function.
     /// Server receives an AppendEntries request from `peer` with `msg.term <=
     /// self.current_term`.
     ///
@@ -530,15 +532,22 @@ impl RaftServer {
     ///
     /// # Invariants
     ///
-    /// 1. `msg.term <= self.current_term` must always be true when this
-    /// function is called.
-    /// 2. This function must never be called for a leader node.
+    /// 1. This function must never be called for a leader node.
     ///
     /// # Panics
     ///
     /// Panics if any invariants are violated.
     // TODO: ensure that only `msg.entries` of length `0` or `1` are handled.
-    fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
+    pub fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
+        // TODO: check if this logic is correct.
+        if msg.term > self.current_term {
+            self.update_term(peer, msg.term);
+            return MessageAppendEntriesResponse {
+                term: self.current_term,
+                success: false,
+            };
+        }
+
         // Assert the invariants.
         assert!(msg.term <= self.current_term);
         // Non-leaders should not be issuing AppendEntries RPC calls.
@@ -688,7 +697,18 @@ impl RaftServer {
     /// specified peer.
     /// Panics if the server's state does not have a `match_index` entry for the
     /// specified peer.
-    fn handle_append_entries_response(&mut self, peer: &Id, msg: &MessageAppendEntriesResponse) {
+    pub fn handle_append_entries_response(&mut self, peer: &Id, msg: &MessageAppendEntriesResponse) {
+        // Responses with stale items are ignored.
+        if msg.term < self.current_term {
+            return;
+        }
+
+        // If the node is ahead of us, update our term.
+        if msg.term > self.current_term {
+            self.update_term(peer, msg.term);
+            return;
+        }
+
         // `term` should be equal to `current_term` as the server issuing the
         // response should've increased its term to match that of the issued
         // request, and as the request came from this server, it should match
@@ -724,27 +744,35 @@ impl RaftServer {
         }
     }
 
-    /// Server receives a RequestVote request from server `peer` with `msg.term
-    /// <= self.current_term`.
-    fn handle_request_vote_request(&mut self, peer: &Id, msg: &MessageRequestVote) -> MessageRequestVoteResponse {
+    /// Server receives a RequestVote request from server `peer`.
+    pub fn handle_request_vote_request(&mut self, peer: &Id, msg: &MessageRequestVote) -> MessageRequestVoteResponse {
+        // If the node is ahead of us, update our term.
+        if msg.term > self.current_term {
+            self.update_term(peer, msg.term);
+            return MessageRequestVoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+            };
+        }
+
         // `term` should never be greater than `current_term` as  `current_term`
-        // should've been advanced after receiving the RPC but prior to calling
-        // this handler.
+        // should've been advanced after receiving the RPC.
         assert!(msg.term <= self.current_term);
 
-        let mut resp = MessageRequestVoteResponse {
-            term: self.current_term,
-            vote_granted: false,
-        };
-
         if msg.term < self.current_term {
-            return resp;
+            return MessageRequestVoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+            };
         }
 
         match self.voted_for {
             Some(candidate_id) if candidate_id == msg.candidate_id => {},
             None => {},
-            _ => return resp,
+            _ => return MessageRequestVoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+            }
         }
 
         // Determine if the candidate's or the receiver's log is more up-to-date.
@@ -754,10 +782,16 @@ impl RaftServer {
         // 2. whichever log is longer is more up-to-date.
         match msg.last_log_term.cmp(&last_term(&self.log)) {
             Ordering::Less => {
-                return resp;
+                return MessageRequestVoteResponse {
+                    term: self.current_term,
+                    vote_granted: false,
+                };
             },
             Ordering::Equal => if msg.last_log_index < self.log.len() {
-                return resp;
+                return MessageRequestVoteResponse {
+                    term: self.current_term,
+                    vote_granted: false,
+                };
             },
             _ => {},
         }
@@ -765,13 +799,25 @@ impl RaftServer {
         // Update the candidate that was voted for.
         self.set_voted_for(Some(msg.candidate_id));
 
-        resp.vote_granted = true;
-        resp
+        return MessageRequestVoteResponse {
+            term: self.current_term,
+            vote_granted: true,
+        };
     }
 
-    /// Server receives a RequestVote response from server `peer` wtih
-    /// `msg.term == self.current_term`.
-    fn handle_request_vote_response(&mut self, peer: &Id, msg: &MessageRequestVoteResponse) {
+    /// Server receives a RequestVote response from server `peer`.
+    pub fn handle_request_vote_response(&mut self, peer: &Id, msg: &MessageRequestVoteResponse) {
+        // Responses with stale items are ignored.
+        if msg.term < self.current_term {
+            return;
+        }
+
+        // If the node is ahead of us, update our term.
+        if msg.term > self.current_term {
+            self.update_term(peer, msg.term);
+            return;
+        }
+
         // `term` should be equal to `current_term` as the server issuing the
         // response should've increased its term to match that of the issued
         // request, and as the request came from this server, it should match
@@ -786,64 +832,21 @@ impl RaftServer {
 
     /// Any RPC with a newer `term` causes the recipient to advance to its term
     /// first.
-    fn update_term(&mut self, peer: &Id, msg: &Message) {
+    /// Starts a new term with the specified value.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the new term is not greater than the current term.
+    fn update_term(&mut self, peer: &Id, term: Term) {
         // The term only needs to be updated if the RPC's `term` is greater than
         // the server's `current_term`.
-        assert!(msg.term() > self.current_term);
+        assert!(term > self.current_term);
 
-        self.current_term = msg.term();
+        self.current_term = term;
         // Updating to a newer term puts the node into the follower state.
         self.state = RaftState::Follower;
         // Reset `voted_for` as we have not voted for anyone in the new term.
         self.voted_for = None;
-    }
-
-    /// Receive a message.
-    ///
-    /// # Returns
-    ///
-    /// Any RPC with a newer term causes the recipient to advance its term
-    /// first, and will return `ReceiveResult::UpdatedTerm`.
-    /// Responses with stale terms will return
-    /// `ReceiveResult::DropStaleResponse` and must be ignored.
-    /// Successfully processed RPC requests will return a
-    /// `ReceiveResult::Response`, which must be sent to the requesting server.
-    /// Successfully processed RPC responses will return a
-    /// `ReceiveResult::ResponseProcessed`.
-    pub fn receive(&mut self, peer: &Id, msg: &Message) -> ReceiveResult {
-        if msg.term() > self.current_term {
-            self.update_term(peer, msg);
-            return ReceiveResult::UpdatedTerm;
-        }
-
-        use self::Message::*;
-        match msg {
-            AppendEntries(msg) => {
-                let res = self.handle_append_entries_request(peer, msg);
-                ReceiveResult::Response(Message::AppendEntriesResponse(res))
-            },
-            AppendEntriesResponse(msg) => {
-                // Responses with stale items are ignored.
-                if msg.term < self.current_term {
-                    return ReceiveResult::DropStaleResponse;
-                }
-
-                self.handle_append_entries_response(peer, msg);
-                ReceiveResult::ResponseProcessed
-            },
-            RequestVote(msg) => ReceiveResult::Response(Message::RequestVoteResponse(
-                self.handle_request_vote_request(peer, msg)
-            )),
-            RequestVoteResponse(msg) => {
-                // Responses with stale items are ignored.
-                if msg.term < self.current_term {
-                    return ReceiveResult::DropStaleResponse;
-                }
-
-                self.handle_request_vote_response(peer, msg);
-                ReceiveResult::ResponseProcessed
-            },
-        }
     }
 
     /// Periodic function which runs election tasks.
@@ -1608,7 +1611,6 @@ mod tests {
     /* AppendEntries RPC response tests */
 
     #[test]
-    #[should_panic]
     fn test_raft_server_handle_append_entries_response_invalid_term() {
         let aer = MessageAppendEntriesResponse {
             term: 1,
@@ -1620,6 +1622,7 @@ mod tests {
         // `current_term` is not equal to `term`
         raft.set_current_term(0);
         raft.handle_append_entries_response(&1, &aer);
+        assert_eq!(raft.current_term, 1);
     }
 
     #[test]
@@ -1799,7 +1802,6 @@ mod tests {
     /* RequestVote RPC response tests */
 
     #[test]
-    #[should_panic]
     fn test_raft_server_handle_request_vote_response_invalid_term() {
         let rvr = MessageRequestVoteResponse {
             term: 1,
@@ -1811,6 +1813,7 @@ mod tests {
         // `current_term` is not equal to `term`
         raft.set_current_term(0);
         raft.handle_request_vote_response(&1, &rvr);
+        assert_eq!(raft.current_term, 1);
     }
 
     #[test]
@@ -1857,10 +1860,47 @@ mod tests {
         );
     }
 
+    /* General RPC tests */
+
+    // Any RPC with a newer term causes the recipient to advance its term first.
+    #[test]
+    fn test_raft_server_rpc_update_term() {
+        let rvr = MessageRequestVoteResponse {
+            term: 2,
+            vote_granted: false,
+        };
+
+        let mut raft = init_single_server();
+        raft.state = RaftState::Candidate(CandidateState::default());
+        // `current_term` is less than `term`.
+        raft.current_term = 1;
+
+        raft.handle_request_vote_response(&1, &rvr);
+        assert_eq!(raft.state, RaftState::Follower);
+        assert_eq!(raft.current_term, 2);
+    }
+
+    // Responses with stale terms are ignored.
+    #[test]
+    fn test_raft_server_receive_message_stale() {
+        let rvr = MessageRequestVoteResponse {
+            term: 1,
+            vote_granted: false,
+        };
+
+        let mut raft = init_single_server();
+        raft.state = RaftState::Candidate(CandidateState::default());
+        // `current_term` is greater than `term`.
+        raft.current_term = 2;
+
+        raft.handle_request_vote_response(&1, &rvr);
+        assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
+    }
+
     /* RaftServer::update_term tests */
 
     #[test]
-    #[should_panic(expected = "assertion failed: msg.term() > self.current_term")]
+    #[should_panic(expected = "assertion failed: term > self.current_term")]
     fn test_raft_server_update_term_older_term() {
         let rvr = Message::RequestVoteResponse(MessageRequestVoteResponse {
             term: 1,
@@ -1871,7 +1911,7 @@ mod tests {
         // `current_term` is greater than `term`.
         raft.current_term = 2;
 
-        raft.update_term(&1, &rvr);
+        raft.update_term(&1, rvr.term());
     }
 
     #[test]
@@ -1887,65 +1927,10 @@ mod tests {
         raft.state = RaftState::Leader(LeaderState::new());
         raft.voted_for = Some(1);
 
-        raft.update_term(&1, &rvr);
+        raft.update_term(&1, rvr.term());
         assert_eq!(raft.current_term, 2);
         assert_eq!(raft.state, RaftState::Follower);
         assert_eq!(raft.voted_for, None);
-    }
-
-    /* RaftServer::receive */
-
-    // Any RPC with a newer term causes the recipient to advance its term first.
-    // Responses with stale terms are ignored.
-    #[test]
-    fn test_raft_server_receive_message_update_term() {
-        let rvr = Message::RequestVoteResponse(MessageRequestVoteResponse {
-            term: 2,
-            vote_granted: false,
-        });
-
-        let mut raft = init_single_server();
-        raft.state = RaftState::Candidate(CandidateState::default());
-        // `current_term` is less than `term`.
-        raft.current_term = 1;
-
-        assert_eq!(raft.receive(&1, &rvr), ReceiveResult::UpdatedTerm);
-        assert_eq!(raft.state, RaftState::Follower);
-        assert_eq!(raft.current_term, 2);
-    }
-
-    #[test]
-    fn test_raft_server_receive_message_processed() {
-        let rvr = Message::RequestVoteResponse(MessageRequestVoteResponse {
-            term: 2,
-            vote_granted: false,
-        });
-
-        let mut raft = init_single_server();
-        raft.state = RaftState::Candidate(CandidateState::default());
-        raft.current_term = 2;
-
-        assert_eq!(raft.receive(&1, &rvr), ReceiveResult::ResponseProcessed);
-        assert_eq!(raft.state, RaftState::Candidate(CandidateState {
-            votes_responded: [1].iter().cloned().collect(),
-            ..Default::default()
-        }));
-    }
-
-    #[test]
-    fn test_raft_server_receive_message_stale() {
-        let rvr = Message::RequestVoteResponse(MessageRequestVoteResponse {
-            term: 1,
-            vote_granted: false,
-        });
-
-        let mut raft = init_single_server();
-        raft.state = RaftState::Candidate(CandidateState::default());
-        // `current_term` is greater than `term`.
-        raft.current_term = 2;
-
-        assert_eq!(raft.receive(&1, &rvr), ReceiveResult::DropStaleResponse);
-        assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
     }
 
     /* `RaftServer::periodic` tests */

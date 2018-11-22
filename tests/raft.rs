@@ -1,7 +1,7 @@
 extern crate castaway;
 
 use std::collections::HashSet;
-use castaway::{Id, Message, RaftServer, ReceiveResult};
+use castaway::{Id, RaftServer};
 
 #[test]
 fn test_leader_election() {
@@ -20,39 +20,24 @@ fn test_leader_election() {
 
     // Vote for self
     let req = servers[0].request_vote(&0).unwrap();
-    let res = match servers[0].receive(&0, &Message::RequestVote(req)) {
-        ReceiveResult::Response(res) => res,
-        _ => unreachable!(),
-    };
-    assert_eq!(servers[0].receive(&0, &res), ReceiveResult::ResponseProcessed);
+    let res = servers[0].handle_request_vote_request(&0, &req);
+    servers[0].handle_request_vote_response(&0, &res);
     assert_eq!(servers[0].voted_for(), Some(0));
     assert!(servers[0].is_candidate());
 
     // Get one vote from another server.
     let req = servers[0].request_vote(&1).unwrap();
-    match servers[1].receive(&0, &Message::RequestVote(req.clone())) {
-        ReceiveResult::UpdatedTerm => {},
-        _ => unreachable!(),
-    };
-    let res = match servers[1].receive(&0, &Message::RequestVote(req)) {
-        ReceiveResult::Response(res) => res,
-        _ => unreachable!(),
-    };
-    assert_eq!(servers[0].receive(&1, &res), ReceiveResult::ResponseProcessed);
+    servers[1].handle_request_vote_request(&0, &req.clone());
+    let res = servers[1].handle_request_vote_request(&0, &req);
+    servers[0].handle_request_vote_response(&1, &res);
     assert_eq!(servers[1].voted_for(), Some(0));
     assert!(servers[0].is_candidate());
 
     // Get third vote to reach majority.
     let req = servers[0].request_vote(&2).unwrap();
-    match servers[2].receive(&0, &Message::RequestVote(req.clone())) {
-        ReceiveResult::UpdatedTerm => {},
-        _ => unreachable!(),
-    };
-    let res = match servers[2].receive(&0, &Message::RequestVote(req)) {
-        ReceiveResult::Response(res) => res,
-        _ => unreachable!(),
-    };
-    assert_eq!(servers[0].receive(&2, &res), ReceiveResult::ResponseProcessed);
+    servers[2].handle_request_vote_request(&0, &req.clone());
+    let res = servers[2].handle_request_vote_request(&0, &req);
+    servers[0].handle_request_vote_response(&2, &res);
     assert_eq!(servers[2].voted_for(), Some(0));
     assert!(servers[0].is_candidate());
 
