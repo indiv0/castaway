@@ -34,6 +34,13 @@ To launch a cluster of containers locally:
 
     docker-compose up --build
 
+C bindings can be acquired by compiling the library with the `cbindgen` feature
+enabled:
+
+    cargo build --features cbindgen
+
+The bindings will be placed in `target/$PROFILE/` (e.g. `target/debug/castaway.h`).
+
 ## Credits
 
 * Raft interface inspired by [willemt/raft][willemt-raft]

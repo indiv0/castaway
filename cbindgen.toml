@@ -1,0 +1,5 @@
+# Flag which disables includes from being written
+# NOTE: Python's CFFI can't handle include directives, so we must strip them.
+no_includes = true
+# Language to output bindings in
+language = "C"
