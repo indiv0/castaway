@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_variables)]
 
+use libc::c_void;
 use rand::{self, Rng};
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
@@ -7,6 +8,8 @@ use std::hash::Hash;
 
 // Randomized election timeout range, in milliseconds.
 const ELECTION_TIMEOUT_RANGE: (usize, usize) = (150, 300);
+
+pub type UserData = *mut c_void;
 
 pub type Id = usize;
 type Command = ();
@@ -215,11 +218,28 @@ pub enum TimeoutError {
     IsLeader,
 }
 
+/// Errors which may occur during Raft server operation.
+#[derive(Debug, PartialEq)]
+pub enum RaftServerError {
+    /// A required callback function was unregistered.
+    UnregisteredCallbackFn,
+}
+
 /// Errors which may occur when advancing the commit index for a leader node.
 #[derive(Debug, PartialEq)]
 enum AdvanceCommitIndexError {
     /// A non-leader node may not advance its commit index.
     NotLeader,
+}
+
+pub type SendRequestVoteExtern = extern fn(user_data: *mut c_void, peer: Id, msg: *mut MessageRequestVote);
+
+/// Callbacks used by the Raft server.
+#[derive(Clone, Debug, PartialEq)]
+#[repr(C)]
+pub struct Callbacks {
+    /// Callback to send a `MessageRequestVote` to `peer`.
+    send_request_vote: SendRequestVoteExtern,
 }
 
 #[derive(Debug, PartialEq)]
@@ -229,6 +249,12 @@ enum RaftState {
     Leader(LeaderState),
 }
 
+/// Raft server implementation.
+///
+/// # Panics
+///
+/// * Panics if the Raft server is in operation and callbacks have not been
+///   registered with `RaftServer::register_callbacks`
 #[derive(Debug)]
 pub struct RaftServer {
     /// Latest term server has seen.
@@ -262,6 +288,10 @@ pub struct RaftServer {
 
     /// Server data for each Raft node.
     servers: HashSet<Id>,
+    /// Callbacks used by the Raft server.
+    callbacks: Option<Callbacks>,
+    /// Extra data added for FFI purposes.
+    user_data: Option<UserData>,
 }
 
 impl RaftServer {
@@ -278,6 +308,8 @@ impl RaftServer {
             election_timer: 0,
             election_timeout: 0,
             servers,
+            callbacks: None,
+            user_data: None,
         }
     }
 
@@ -299,6 +331,11 @@ impl RaftServer {
 
     fn set_state(&mut self, state: RaftState) {
         self.state = state;
+    }
+
+    pub fn register_callbacks(&mut self, callbacks: Callbacks, user_data: *mut c_void) {
+        self.callbacks = Some(callbacks);
+        self.user_data = Some(user_data);
     }
 
     /// Randomize the election timeout to be anywhere in the `ELECTION_TIMEOUT_RANGE`, inclusive.
@@ -415,14 +452,14 @@ impl RaftServer {
     /// # Panics
     ///
     /// Panics if the server is currently in the candidate state.
-    fn become_candidate(&mut self) {
+    fn become_candidate(&mut self) -> Result<(), RaftServerError> {
         if self.is_candidate() {
             panic!("become_candidate called on candidate node");
         }
 
         self.state = RaftState::Candidate(CandidateState::default());
 
-        self.start_election();
+        self.start_election()
     }
 
     /// Candidate transitions to leader.
@@ -850,7 +887,7 @@ impl RaftServer {
     }
 
     /// Periodic function which runs election tasks.
-    pub fn periodic(&mut self, ms_since_last_period: usize) {
+    pub fn periodic(&mut self, ms_since_last_period: usize) -> Result<(), RaftServerError> {
         self.election_timer += ms_since_last_period;
 
         match self.state {
@@ -859,12 +896,14 @@ impl RaftServer {
             // viable leader and begins an election to choose a new leader.
             RaftState::Follower => {
                 if self.is_election_timeout_elapsed() && self.voted_for().is_none() {
-                    self.become_candidate();
+                    self.become_candidate()?;
                 }
             },
             RaftState::Candidate(ref state) => unimplemented!(),
             RaftState::Leader(ref state) => unimplemented!(),
         }
+
+        Ok(())
     }
 
     /// Start a new election.
@@ -879,23 +918,26 @@ impl RaftServer {
     ///
     /// 1. Only candidates may start an election.
     /// 2. Callbacks must have been registered via `RaftServer::register_callbacks`.
-    fn start_election(&mut self) {
+    fn start_election(&mut self) -> Result<(), RaftServerError> {
         assert!(self.is_candidate());
 
         self.current_term += 1;
 
+        // TODO: perhaps vote for self via a RequestVote RPC call?
         match self.state {
             RaftState::Candidate(ref mut state) => state.receive_vote(self.id, true),
             _ => unreachable!(),
         }
+        // TODO: add tests to ensure that the server votes for itself.
+        let id = self.id;
+        self.set_voted_for(Some(id));
 
         self.election_timer = 0;
 
         // Generate vote requests for each server that has yet to vote.
-        let vote_requests = self.servers.clone().iter()
-            .map(|server| self.request_vote(server))
-            .flat_map(|res| match res {
-                Ok(msg) => Some(msg),
+        let mut vote_requests = self.servers.clone().iter()
+            .flat_map(|server| match self.request_vote(server) {
+                Ok(msg) => Some((*server, msg)),
                 // Per invariant #1, this should never be the case.
                 Err(RequestVoteError::NotCandidate) => unreachable!(),
                 // NOTE: in theory, this should be the case for only the present
@@ -903,9 +945,20 @@ impl RaftServer {
                 // have been issued yet.
                 Err(RequestVoteError::AlreadyResponded) => None,
             })
-            .collect::<Vec<MessageRequestVote>>();
+            .collect::<Vec<(Id, MessageRequestVote)>>();
 
-        unimplemented!();
+        let callbacks = self.callbacks
+            .as_ref()
+            .ok_or_else(|| RaftServerError::UnregisteredCallbackFn)?;
+        let user_data = self.user_data
+            .ok_or_else(|| RaftServerError::UnregisteredCallbackFn)?;
+
+        // Send the vote requests to each server.
+        for (peer, req) in vote_requests.iter_mut() {
+            (callbacks.send_request_vote)(user_data, *peer as Id, req as *mut _);
+        }
+
+        Ok(())
     }
 
     /* Helpers */
@@ -981,7 +1034,31 @@ fn sub_seq<T>(s: &[T], m: usize, n: usize) -> &[T] {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::ptr;
     use super::*;
+
+    thread_local!{
+        static SENT_MESSAGES: RefCell<Vec<(usize, MessageRequestVote)>> = RefCell::new(Vec::new());
+    }
+
+    extern fn send_request_vote(udata: *mut c_void, peer: usize, msg: *mut MessageRequestVote) {
+        let msg = unsafe {
+            (*msg).clone()
+        };
+        SENT_MESSAGES.with(|prev| {
+            (*prev.borrow_mut()).push((peer, msg));
+        });
+    }
+    extern fn send_request_vote_noop(udata: *mut c_void, peer: usize, msg: *mut MessageRequestVote) {}
+
+    const MOCK_CALLBACKS: Callbacks = Callbacks {
+        send_request_vote,
+    };
+    const MOCK_CALLBACKS_NOOP: Callbacks = Callbacks {
+        send_request_vote: send_request_vote_noop,
+    };
+
 
     fn init_single_server() -> RaftServer {
         RaftServer::new(0, [0].iter().cloned().collect())
@@ -1049,6 +1126,33 @@ mod tests {
         assert_eq!(raft.state, RaftState::Follower);
         raft.set_state(RaftState::Leader(leader_state.clone()));
         assert_eq!(raft.state, RaftState::Leader(leader_state));
+    }
+
+    /* `RaftServer::register_callbacks` tests */
+
+    #[test]
+    fn test_raft_server_register_callbacks() {
+        let mut raft = init_single_server();
+
+        raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
+    }
+
+    #[test]
+    fn test_raft_server_callback_send_request_vote() {
+        let mut raft = init_single_server();
+        raft.register_callbacks(MOCK_CALLBACKS, ptr::null_mut());
+
+        let mut msg = MessageRequestVote {
+            term: 1,
+            candidate_id: 0,
+            last_log_term: 1,
+            last_log_index: 1,
+        };
+        SENT_MESSAGES.with(|messages| {
+            assert_eq!(*messages, RefCell::new(Vec::new()));
+            (raft.callbacks.unwrap().send_request_vote)(raft.user_data.unwrap(), 1, &mut msg as *mut _);
+            assert_eq!(messages.borrow().get(0), Some(&(1, msg)));
+        });
     }
 
     /* `RaftServer::randomize_election_timeout` tests */
@@ -1261,12 +1365,15 @@ mod tests {
     /* `RaftServer::become_candidate` tests */
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_become_candidate() {
         let mut raft = init_single_server();
+        raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
 
-        raft.become_candidate();
-        assert_eq!(raft.state, RaftState::Candidate(CandidateState::default()));
+        raft.become_candidate().unwrap();
+        assert_eq!(raft.state, RaftState::Candidate(CandidateState {
+            votes_responded: [0].iter().cloned().collect(),
+            votes_granted: [0].iter().cloned().collect(),
+        }));
     }
 
     #[test]
@@ -1275,7 +1382,7 @@ mod tests {
         let mut raft = init_single_server();
         raft.state = RaftState::Candidate(CandidateState::default());
 
-        raft.become_candidate();
+        raft.become_candidate().unwrap();
     }
 
     /* `RaftServer::become_leader` tests */
@@ -1936,50 +2043,53 @@ mod tests {
     /* `RaftServer::periodic` tests */
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_periodic_follower_election_timeout_elapses() {
         let mut raft = init_single_server();
+        raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
 
         raft.election_timer = 0;
         raft.election_timeout = 150;
         assert!(raft.is_follower());
-        raft.periodic(200);
+        raft.periodic(200).unwrap();
         assert!(raft.is_candidate());
     }
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_periodic_follower_election_timeout_elapses_vote_already_granted() {
         let servers: HashSet<Id> = [0, 1].iter().cloned().collect();
         let mut raft = RaftServer::new(0, servers.clone());
+        raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
 
         raft.set_voted_for(Some(1));
         raft.election_timer = 0;
         raft.election_timeout = 150;
         assert!(raft.is_follower());
-        raft.periodic(200);
+        raft.periodic(200).unwrap();
         assert!(raft.is_follower());
     }
 
     /* `RaftServer::start_election` tests */
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_raft_server_start_election() {
-        let mut raft = init_single_server();
+        let servers: HashSet<Id> = [0, 1, 2, 3].iter().cloned().collect();
+        let mut raft = RaftServer::new(0, servers.clone());
+        raft.register_callbacks(MOCK_CALLBACKS, ptr::null_mut());
 
         raft.state = RaftState::Candidate(CandidateState::default());
         raft.election_timer = 10;
         raft.set_current_term(5);
-        raft.start_election();
+        raft.start_election().unwrap();
         assert_eq!(raft.current_term, 6);
         assert_eq!(raft.state, RaftState::Candidate(CandidateState {
             votes_responded: [0].iter().cloned().collect(),
             votes_granted: [0].iter().cloned().collect(),
         }));
+        assert_eq!(raft.voted_for, Some(raft.id));
         assert_eq!(raft.election_timer, 0);
-
-        // TODO: test that vote request callback is issued correctly.
+        SENT_MESSAGES.with(|messages| {
+            assert_eq!(messages.borrow().len(), 3);
+        });
     }
 
     #[test]
@@ -1987,7 +2097,7 @@ mod tests {
     fn test_raft_server_start_election_is_not_candidate() {
         let mut raft = init_single_server();
 
-        raft.start_election();
+        raft.start_election().unwrap();
     }
 
     /* Helper tests */
