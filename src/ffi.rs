@@ -1,7 +1,16 @@
-use raft::{Callbacks, Id, RaftServer, UserData};
+use libc::c_int;
+use raft::{
+    Callbacks,
+    Id,
+    RaftServer,
+    UserData,
+};
 use std::slice;
 use std::mem::transmute;
 use std::ops::Deref;
+
+pub const CASTAWAY_OPT_SOME: isize = 1;
+pub const CASTAWAY_OPT_NONE: isize = 0;
 
 struct CVec<T> {
     ptr: *const T,
@@ -54,4 +63,18 @@ pub extern "C" fn raft_server_register_callbacks(raft_ptr: *mut RaftServer, call
 pub extern "C" fn raft_server_periodic(ptr: *mut RaftServer, ms_since_last_period: usize) {
     let mut _raft = unsafe { &mut *ptr };
     _raft.periodic(ms_since_last_period).unwrap();
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_voted_for(ptr: *mut RaftServer, peer: *mut Id) -> c_int {
+    let _raft = unsafe { &mut *ptr };
+    let _peer = unsafe { &mut *peer };
+
+    if let Some(v) = _raft.voted_for() {
+        *_peer = v;
+    } else {
+        return CASTAWAY_OPT_NONE as c_int;
+    }
+
+    return CASTAWAY_OPT_SOME as c_int;
 }

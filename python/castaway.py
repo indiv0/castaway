@@ -21,6 +21,16 @@ def send_request_vote(udata, peer, message):
     print("callback 'send_request_vote' issued to {p} from {s}".format(p=peer,s=s.id))
 
 
+def verify_option(ptr, errno):
+    if errno == lib.CASTAWAY_OPT_SOME:
+        assert ptr != ffi.NULL
+        return ptr[0]
+    elif errno == lib.CASTAWAY_OPT_NONE:
+        return None
+    else:
+        raise WrapperException.last_error()
+
+
 class RaftServer(object):
     def __init__(self, id, servers):
         servers = ArrayUintPtr(servers)
@@ -57,6 +67,12 @@ class RaftServer(object):
         lib.raft_server_periodic(self.__obj, ms_since_last_period)
 
 
+    def voted_for(self):
+        voted_for_p = ffi.new("Id *")
+        res = lib.raft_server_voted_for(self.__obj, voted_for_p)
+        return verify_option(voted_for_p, res)
+
+
 def main():
     server_ids = [i for i in range(0, 5)]
     with ExitStack() as stack:
@@ -65,8 +81,16 @@ def main():
 
         print("Initialized servers: {}".format(server_ids))
 
-        for server in servers:
-            server.periodic(500)
+        for s in servers:
+            print("server {s} voted for: {p}".format(s=s.id, p=s.voted_for()))
+            assert s.voted_for() is None
+
+        for s in servers:
+            s.periodic(500)
+
+        for s in servers:
+            print("server {s} voted for: {p}".format(s=s.id, p=s.voted_for()))
+            assert s.voted_for() == s.id
 
 
 if __name__ == "__main__":
