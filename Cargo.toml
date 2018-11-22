@@ -3,6 +3,10 @@ name = "castaway"
 version = "0.1.0"
 authors = ["Nikita Pekin <contact@nikitapek.in>"]
 
+[lib]
+name = "castaway"
+crate-type = ["rlib", "dylib"]
+
 [dependencies]
 libc = "0.2.44"
 rand = "0.5.5"
