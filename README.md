@@ -41,8 +41,15 @@ enabled:
 
 The bindings will be placed in `target/$PROFILE/` (e.g. `target/debug/castaway.h`).
 
+To run the Python wrapper library (note that the C bindings must have already
+been generated):
+
+    python python/castaway.py
+
 ## Credits
 
 * Raft interface inspired by [willemt/raft][willemt-raft]
+* cbindgen usage inspired by: [Michael F. Bryan's Rust FFI Guide][bryan-ffi]
 
+[brian-ffi]: https://michael-f-bryan.github.io/rust-ffi-guide/overview.html
 [willemt-raft]: https://github.com/willemt/raft

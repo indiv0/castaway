@@ -1,5 +1,8 @@
+extern crate libc;
 extern crate rand;
 
+mod ffi;
 mod raft;
 
-pub use raft::{Id, Message, RaftServer, ReceiveResult};
+pub use ffi::*;
+pub use raft::*;
