@@ -29,46 +29,10 @@ impl LogEntry {
     }
 }
 
-/// Possible results once a message has been received.
-#[derive(Debug, PartialEq)]
-pub enum ReceiveResult {
-    /// A response with a stale term was received, and so must be dropped.
-    DropStaleResponse,
-    /// An RPC request was processed, a response was generated and must be sent.
-    // TODO: enforce the invariant that ONLY response-type messages should be
-    // returned here.
-    Response(Message),
-    /// An RPC response was successfully processed.
-    ResponseProcessed,
-    /// An RPC with a newer term caused the recipient to advance its term first.
-    UpdatedTerm,
-}
-
-/// RPC request or response message.
-#[derive(Debug, PartialEq)]
-pub enum Message {
-    AppendEntries(MessageAppendEntries),
-    AppendEntriesResponse(MessageAppendEntriesResponse),
-    RequestVote(MessageRequestVote),
-    RequestVoteResponse(MessageRequestVoteResponse),
-}
-
-impl Message {
-    fn term(&self) -> usize {
-        use self::Message::*;
-        match self {
-            AppendEntries(MessageAppendEntries { term, .. }) => *term,
-            AppendEntriesResponse(MessageAppendEntriesResponse { term, .. }) => *term,
-            RequestVote(MessageRequestVote { term, .. }) => *term,
-            RequestVoteResponse(MessageRequestVoteResponse { term, .. }) => *term,
-        }
-    }
-}
-
 /// Message invoked by leader to replicate log entries (§5.3); also used as
 /// heartbeat (§5.2).
 #[derive(Clone, Debug, PartialEq)]
-pub struct MessageAppendEntries {
+pub struct MessageAppendEntries<'a> {
     /// Leader's term.
     term: Term,
     /// Used so follower nodes can redirect clients to the leader.
@@ -80,7 +44,7 @@ pub struct MessageAppendEntries {
     /// Log entries to store.
     ///
     /// Empty for heartbeat messages; may send more than one for efficiency.
-    entries: Vec<LogEntry>,
+    entries: &'a [LogEntry],
     /// Leader's `commit_index`.
     leader_commit: usize,
 }
@@ -430,7 +394,7 @@ impl RaftServer {
                 // TODO: determine if `sub_seq` is really necessary here,
                 // assuming that `next_index` and `last_entry` have sane values.
                 // It should be possible to do this with simple slicing.
-                let entries = sub_seq(&self.log, next_index, last_entry).to_vec();
+                let entries = sub_seq(&self.log, next_index, last_entry);
 
                 return Ok(MessageAppendEntries {
                     term: self.current_term,
@@ -1270,16 +1234,18 @@ mod tests {
         let mut raft1 = RaftServer::new(1, servers);
         raft1.current_term = 5;
 
-        let req = raft.append_entries(&1);
-        assert_eq!(req, Ok(MessageAppendEntries {
-            term: 5,
-            leader_id: 0,
-            prev_log_index: 2,
-            prev_log_term: 2,
-            entries: Vec::new(),
-            leader_commit: 0,
-        }));
-        let res = raft1.handle_append_entries_request(&0, &req.unwrap());
+        let res = {
+            let req = raft.append_entries(&1);
+            assert_eq!(req, Ok(MessageAppendEntries {
+                term: 5,
+                leader_id: 0,
+                prev_log_index: 2,
+                prev_log_term: 2,
+                entries: &[],
+                leader_commit: 0,
+            }));
+            raft1.handle_append_entries_request(&0, &req.unwrap())
+        };
         raft.handle_append_entries_response(&1, &res);
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 2)].iter().cloned().collect(),
@@ -1303,16 +1269,18 @@ mod tests {
         let mut raft1 = RaftServer::new(1, servers);
         raft1.current_term = 5;
 
-        let req = raft.append_entries(&1);
-        assert_eq!(req, Ok(MessageAppendEntries {
-            term: 5,
-            leader_id: 0,
-            prev_log_index: 1,
-            prev_log_term: 1,
-            entries: Vec::new(),
-            leader_commit: 0,
-        }));
-        let res = raft1.handle_append_entries_request(&0, &req.unwrap());
+        let res = {
+            let req = raft.append_entries(&1);
+            assert_eq!(req, Ok(MessageAppendEntries {
+                term: 5,
+                leader_id: 0,
+                prev_log_index: 1,
+                prev_log_term: 1,
+                entries: &[],
+                leader_commit: 0,
+            }));
+            raft1.handle_append_entries_request(&0, &req.unwrap())
+        };
         raft.handle_append_entries_response(&1, &res);
         assert_eq!(raft.state, RaftState::Leader(LeaderState {
             next_index: [(1, 1)].iter().cloned().collect(),
@@ -1340,7 +1308,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 3,
             prev_log_term: 4,
-            entries: Vec::new(),
+            entries: &[],
             leader_commit: 0,
         }));
     }
@@ -1532,7 +1500,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 0,
-            entries: Vec::new(),
+            entries: &[],
             leader_commit: 0,
         };
 
@@ -1554,7 +1522,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 4,
-            entries: Vec::new(),
+            entries: &[],
             leader_commit: 0,
         };
 
@@ -1584,7 +1552,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 2,
             prev_log_term: 2,
-            entries: vec![LogEntry((), 4)],
+            entries: &[LogEntry((), 4)],
             leader_commit: 0,
         };
 
@@ -1620,7 +1588,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
+            entries: &[LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
             leader_commit: 0,
         };
 
@@ -1650,7 +1618,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
+            entries: &[LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
             leader_commit: 0,
         };
 
@@ -1680,7 +1648,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![
+            entries: &[
                 LogEntry((), 2),
                 LogEntry((), 4),
                 LogEntry((), 4),
@@ -2009,24 +1977,24 @@ mod tests {
     #[test]
     #[should_panic(expected = "assertion failed: term > self.current_term")]
     fn test_raft_server_update_term_older_term() {
-        let rvr = Message::RequestVoteResponse(MessageRequestVoteResponse {
+        let rvr = MessageRequestVoteResponse {
             term: 1,
             vote_granted: false,
-        });
+        };
 
         let mut raft = init_single_server();
         // `current_term` is greater than `term`.
         raft.current_term = 2;
 
-        raft.update_term(&1, rvr.term());
+        raft.update_term(&1, rvr.term);
     }
 
     #[test]
     fn test_raft_server_update_term_newer_term() {
-        let rvr = Message::RequestVoteResponse(MessageRequestVoteResponse {
+        let rvr = MessageRequestVoteResponse {
             term: 2,
             vote_granted: false,
-        });
+        };
 
         let mut raft = init_single_server();
         // `current_term` is less than `term`.
@@ -2034,7 +2002,7 @@ mod tests {
         raft.state = RaftState::Leader(LeaderState::new());
         raft.voted_for = Some(1);
 
-        raft.update_term(&1, rvr.term());
+        raft.update_term(&1, rvr.term);
         assert_eq!(raft.current_term, 2);
         assert_eq!(raft.state, RaftState::Follower);
         assert_eq!(raft.voted_for, None);
