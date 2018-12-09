@@ -16,5 +16,9 @@ def load(filename):
 
 ffi = cffi.FFI()
 ffi.cdef(load(BINDINGS_FILE))
+ffi.cdef("""
+void *malloc(size_t size);
+void free(void *ptr);
+""")
 
 lib = ffi.dlopen(LIBRARY_FILE)

@@ -4,7 +4,11 @@ use libc::{c_char, c_int};
 use raft::{
     Callbacks,
     Id,
-    MessageAppendEntries,
+    MessageAppendEntriesRaw,
+    MessageAppendEntriesResponse,
+    MessageRequestVote,
+    MessageRequestVoteResponse,
+    NodeInfo,
     RaftServer,
     UserData,
 };
@@ -12,7 +16,6 @@ use std::cell::RefCell;
 use std::error::Error as StdError;
 use std::slice;
 use std::mem::transmute;
-use std::ops::Deref;
 use std::ptr;
 
 // TODO: make the error codes negative.
@@ -27,28 +30,6 @@ thread_local!{
     static LAST_ERROR: RefCell<Option<Box<StdError>>> = RefCell::new(None);
 }
 
-struct CVec<T> {
-    ptr: *const T,
-    len: usize,
-}
-
-impl<T> CVec<T> {
-    fn new(ptr: *const T, len: usize) -> Self {
-        assert!(!ptr.is_null());
-        Self {
-            ptr,
-            len,
-        }
-    }
-}
-
-impl<T> Deref for CVec<T> {
-    type Target = [T];
-
-    fn deref(&self) -> &[T] {
-        unsafe { slice::from_raw_parts(self.ptr, self.len) }
-    }
-}
 
 /// Update the most recent error, clearing whatever may have been there before.
 pub fn update_last_error<E: StdError + 'static>(err: E) {
@@ -136,11 +117,13 @@ pub unsafe extern "C" fn last_error_message(buffer: *mut c_char, length: c_int) 
 
 /// Instantiate a `RaftServer` in memory and return a pointer to it.
 #[no_mangle]
-pub extern "C" fn raft_server_new(id: Id, servers_ptr: *const usize, servers_len: usize) -> *mut RaftServer {
+pub extern "C" fn raft_server_new(id: Id) -> *mut RaftServer {
+    // FIXME: remove this
+    /*
     let servers = CVec::new(servers_ptr, servers_len);
     let servers = servers.iter().cloned().collect();
-
-    let raft = RaftServer::new(id, servers);
+    */
+    let raft = RaftServer::new(id);
     unsafe { transmute(Box::new(raft)) }
 }
 
@@ -159,10 +142,30 @@ pub extern "C" fn raft_server_register_callbacks(raft_ptr: *mut RaftServer, call
 }
 
 #[no_mangle]
-pub extern "C" fn raft_server_recv_append_entries(raft_ptr: *mut RaftServer, peer: &Id, message_ptr: *const MessageAppendEntries) {
+pub extern "C" fn raft_server_add_peer(raft_ptr: *mut RaftServer, peer_id: Id, user_data_ptr: UserData) {
     let _raft = unsafe { &mut *raft_ptr };
-    let _msg = unsafe { & *message_ptr };
-    _raft.handle_append_entries_request(peer, &_msg);
+    _raft.add_peer(peer_id, user_data_ptr);
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_get_node_info_by_id(raft_ptr: *mut RaftServer, id: Id, node_info: *mut *const NodeInfo) -> c_int {
+    let _raft = unsafe { &mut *raft_ptr };
+    let node = _raft.get_node_info_by_id(id);
+    if let Some(node) = node {
+        unsafe { *node_info = node };
+    } else {
+        unsafe { *node_info = ptr::null() };
+        return CASTAWAY_OPT_NONE as c_int;
+    }
+
+    CASTAWAY_OPT_SOME as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_recv_append_entries(raft_ptr: *mut RaftServer, peer: &Id, _msg: MessageAppendEntriesRaw) {
+    let _raft = unsafe { &mut *raft_ptr };
+    let msg = _msg.into();
+    _raft.handle_append_entries_request(peer, &msg);
 }
 
 #[no_mangle]
@@ -194,4 +197,32 @@ pub extern "C" fn raft_server_voted_for(ptr: *mut RaftServer, peer: *mut Id) -> 
     }
 
     return CASTAWAY_OPT_SOME as c_int;
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_handle_request_vote_request(ptr: *mut RaftServer, peer: Id, msg: *const MessageRequestVote) -> MessageRequestVoteResponse {
+    let mut _raft = unsafe { &mut *ptr };
+    let _msg = unsafe { &*msg };
+    _raft.handle_request_vote_request(&peer, _msg)
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_handle_request_vote_response(ptr: *mut RaftServer, peer: Id, msg: *const MessageRequestVoteResponse) {
+    let mut _raft = unsafe { &mut *ptr };
+    let _msg = unsafe { &*msg };
+    _raft.handle_request_vote_response(&peer, _msg);
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_handle_append_entries_request(ptr: *mut RaftServer, peer: Id, msg: *const MessageAppendEntriesRaw) -> MessageAppendEntriesResponse {
+    let mut _raft = unsafe { &mut *ptr };
+    let _msg = unsafe { &*msg };
+    _raft.handle_append_entries_request(&peer, &(*_msg).clone().into())
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_handle_append_entries_response(ptr: *mut RaftServer, peer: Id, msg: *const MessageAppendEntriesResponse) {
+    let mut _raft = unsafe { &mut *ptr };
+    let _msg = unsafe { &*msg };
+    _raft.handle_append_entries_response(&peer, _msg).unwrap();
 }
