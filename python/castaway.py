@@ -3,7 +3,7 @@ from contextlib import ExitStack
 from castaway_cffi import ffi, lib
 
 NUM_SERVERS = 2
-NUM_PERIODS = 30
+NUM_PERIODS = 100
 MS_PER_PERIOD = 10
 
 class ArrayUintPtr(object):
@@ -65,6 +65,10 @@ class Simulator(object):
                 message.sender.id,
                 message.recipient.id,
                 ffi.getctype(ffi.typeof(message.handle))))
+            if message.handle.vote_granted:
+                print("CAST: server {} received vote from peer {}".format(
+                    message.recipient.id,
+                    message.sender.id))
             lib.raft_server_handle_request_vote_response(
                     message.recipient.raft,
                     message.sender.id,

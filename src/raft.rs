@@ -355,6 +355,9 @@ pub struct RaftServer {
     /// Callbacks used by the Raft server.
     callbacks: Option<Callbacks>,
 
+    /// ID of the node, if any, which is considered the leader among the known
+    /// Raft servers.
+    leader_node: Option<Id>,
     /// Node information for this Raft server.
     node: NodeInfo,
     /// Node information for remote Raft peers.
@@ -374,6 +377,7 @@ impl RaftServer {
             election_timer: 0,
             election_timeout: 0,
             callbacks: None,
+            leader_node: None,
             node: NodeInfo {
                 id,
                 user_data: ptr::null_mut(),
@@ -521,7 +525,6 @@ impl RaftServer {
                     Some(next_index) => next_index,
                     None => panic!("Leader state missing next_index for peer {}", peer),
                 };
-                println!("next_index: {}", next_index);
                 let prev_log_index = next_index - 1;
                 let prev_log_term = if prev_log_index > 0 {
                     match self.log.get(prev_log_index - 1) {
@@ -579,8 +582,17 @@ impl RaftServer {
         }
 
         self.state = RaftState::Candidate(CandidateState::default());
+        self.randomize_election_timeout();
+        self.election_timer = 0;
 
         self.start_election()
+    }
+
+    /// Node transitions to follower.
+    fn become_follower(&mut self) {
+        self.state = RaftState::Follower;
+        self.randomize_election_timeout();
+        self.election_timer = 0;
     }
 
     /// Attempt to transition this candidate node to leader.
@@ -605,6 +617,8 @@ impl RaftServer {
             self.node_ids().iter().cloned().map(|s| (s, self.log.len() + 1)).collect(),
             self.node_ids().iter().cloned().map(|s| (s, 0)).collect(),
         ));
+        self.election_timer = 0;
+        self.leader_node = Some(self.id());
 
         // Upon election: send initial empty AppendEntries RPCs (heartbeat) to
         // each server; repeat during idle periods to prevent election timeouts
@@ -731,13 +745,23 @@ impl RaftServer {
 
         // If we're a candidate, we should return to the follower state.
         if self.is_candidate() {
-            self.state = RaftState::Follower;
+            self.become_follower();
+            // FIXME: ensure that not returning here complies with the Raft
+            // specification.
+            /*
             return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 current_index: self.log.len(),
             };
+            */
         }
+
+        // Since we received a valid AppendEntries RPC request, we ensure that
+        // the sender is considered our leader, and reset the election timeout.
+        self.leader_node = Some(*peer);
+        println!("RAFT: server {} confirmed {} as leader", self.id(), peer);
+        self.election_timer = 0;
 
         // If we're not a candidate, we must be a follower as leaders ignore
         // incoming AppendEntries RPCs.
@@ -877,6 +901,7 @@ impl RaftServer {
         // as we are no longer the leader.
         if msg.term > self.current_term {
             self.update_term(peer, msg.term);
+            self.leader_node = None;
             return Ok(());
         }
 
@@ -930,14 +955,28 @@ impl RaftServer {
             _ => panic!("Non-leader node handling AppendEntries response"),
         }
 
+        // FIXME: we're retrying when we shouldn't be for some reason
+        println!("RAFT: retrying append entries");
         self.send_append_entries(*peer)
     }
 
     /// Server receives a RequestVote request from server `peer`.
     pub fn handle_request_vote_request(&mut self, peer: &Id, msg: &MessageRequestVote) -> MessageRequestVoteResponse {
+        // Ignore any RequestVote RPCs if we already have a leader that is still
+        // responding in a timely manner.
+        if self.leader_node.is_some() && self.leader_node != Some(*peer) &&
+            !self.is_election_timeout_elapsed()
+        {
+            return MessageRequestVoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+            }
+        }
+
         // If the node is ahead of us, update our term.
         if msg.term > self.current_term {
             self.update_term(peer, msg.term);
+            self.leader_node = None;
         }
 
         // `term` should never be greater than `current_term` as  `current_term`
@@ -950,6 +989,13 @@ impl RaftServer {
                 vote_granted: false,
             };
         }
+
+        // TODO: have we actually confirmed we're in an election by this point?
+        // We've confirmed that we're in an election, so regardless of whether
+        // or not we actually vote for the peer, we reset election-related
+        // values.
+        self.leader_node = None;
+        self.election_timer = 0;
 
         match self.voted_for {
             Some(candidate_id) if candidate_id == msg.candidate_id => {},
@@ -996,6 +1042,7 @@ impl RaftServer {
         // as we are no longer a candidate.
         if msg.term > self.current_term {
             self.update_term(peer, msg.term);
+            self.leader_node = None;
             return;
         }
 
@@ -1030,7 +1077,7 @@ impl RaftServer {
 
         self.current_term = term;
         // Updating to a newer term puts the node into the follower state.
-        self.state = RaftState::Follower;
+        self.become_follower();
         // Reset `voted_for` as we have not voted for anyone in the new term.
         self.voted_for = None;
     }
@@ -1074,6 +1121,7 @@ impl RaftServer {
                 if self.is_heartbeat_interval_elapsed() {
                     for peer in self.peer_ids() {
                         self.send_append_entries(peer)?;
+                        self.election_timer = 0;
                     }
                 }
 
@@ -1119,6 +1167,8 @@ impl RaftServer {
         }
         // TODO: add tests to ensure that the server votes for itself.
         self.set_voted_for(Some(id));
+        // Set leader to none as we have no leader until the election ends.
+        self.leader_node = None;
 
         self.election_timer = 0;
 
