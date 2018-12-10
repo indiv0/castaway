@@ -1,11 +1,13 @@
 #![allow(dead_code, unused_variables)]
 
-use libc::c_void;
+use libc::{c_void, size_t, uint32_t};
 use rand::{self, Rng};
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::mem;
 use std::ptr;
+use std::slice;
 use utils::CVec;
 
 // Randomized election timeout range, in milliseconds.
@@ -25,15 +27,72 @@ pub type Term = usize;
 /// Each entry contains a command for the state machine, and the term when the
 /// entry was received by the leader (first index is 1).
 #[derive(Clone, Debug, PartialEq)]
-pub struct LogEntry(Command, Term);
-/// Log to replicate across servers.
-type Log = Vec<LogEntry>;
+#[repr(C)]
+pub struct LogEntry {
+    command: Command,
+    term: Term,
+}
 
 impl LogEntry {
+    fn new(command: Command, term: Term) -> Self {
+        Self { command, term }
+    }
+
     fn term(&self) -> Term {
-        self.1
+        self.term
     }
 }
+
+// FIXME: get rid of this
+/*
+#[repr(C)]
+pub struct Tuple {
+    a: uint32_t,
+    b: uint32_t,
+}
+*/
+
+#[repr(C)]
+pub struct Array {
+    data: *const c_void,
+    len: size_t,
+}
+
+impl Array {
+    unsafe fn as_u32_slice(&self) -> &[u32] {
+        assert!(!self.data.is_null());
+        slice::from_raw_parts(self.data as *const u32, self.len as usize)
+    }
+
+    fn from_vec<T>(mut vec: Vec<T>) -> Array {
+        // Important to make length and capacity match.
+        // A better solution is to track both length and capacity.
+        vec.shrink_to_fit();
+
+        let array = Array { data: vec.as_ptr() as *const c_void, len: vec.len() as size_t };
+
+        // Leak the memory, and now the raw pointer (and eventually C) is the
+        // owner.
+        mem::forget(vec);
+
+        array
+    }
+}
+
+/*
+#[no_mangle]
+pub extern "C" fn convert_vec(a: Array, b: Array) -> Array {
+    let a = unsafe { a.as_u32_slice() };
+    let b = unsafe { b.as_u32_slice() };
+
+    let vec =
+        a.iter().zip(b.iter())
+        .map(|(&a, &b)| Tuple { a, b })
+        .collect();
+
+    Array::from_vec(vec)
+}
+*/
 
 /// Message invoked by leader to replicate log entries (§5.3); also used as
 /// heartbeat (§5.2).
@@ -104,10 +163,8 @@ pub struct MessageAppendEntriesResponse {
     /// `prev_log_term`.
     pub success: bool,
 
-    /// Index of the last appended entry if the RPC was successful;
-    /// `current_index` otherwise.
     // TODO: determine if this does not violate the Raft specification.
-    pub current_index: usize,
+    pub match_index: usize,
 }
 
 /// Message invoked by candidates to gather votes (§5.2).
@@ -213,6 +270,14 @@ impl LeaderState {
         // Logs are 1-indexed, thus cannot be zero.
         assert!(next_index > 0);
         self.next_index.insert(id, next_index);
+    }
+
+    fn match_index(&self, id: &Id) -> Option<usize> {
+        self.match_index.get(id).map(ToOwned::to_owned)
+    }
+
+    fn set_match_index(&mut self, id: Id, match_index: usize) {
+        self.match_index.insert(id, match_index);
     }
 }
 
@@ -370,7 +435,7 @@ impl RaftServer {
         let mut raft = Self {
             current_term: 0,
             voted_for: None,
-            log: log_new(),
+            log: Log::default(),
             commit_index: 0,
             last_applied: 0,
             state: RaftState::Follower,
@@ -411,6 +476,10 @@ impl RaftServer {
 
     fn set_state(&mut self, state: RaftState) {
         self.state = state;
+    }
+
+    fn current_index(&self) -> usize {
+        self.log.len()
     }
 
     /// Return a list of every peer's ID.
@@ -493,8 +562,8 @@ impl RaftServer {
         Ok(MessageRequestVote {
             term: self.current_term,
             candidate_id: self.id(),
-            last_log_term: last_term(&self.log),
-            last_log_index: self.log.len(),
+            last_log_term: self.log.last_term(),
+            last_log_index: self.current_index(),
         })
     }
 
@@ -527,7 +596,7 @@ impl RaftServer {
                 };
                 let prev_log_index = next_index - 1;
                 let prev_log_term = if prev_log_index > 0 {
-                    match self.log.get(prev_log_index - 1) {
+                    match self.log.get(prev_log_index) {
                         Some(entry) => entry.term(),
                         None => panic!("Missing log entry: {}", prev_log_index),
                     }
@@ -536,12 +605,12 @@ impl RaftServer {
                 };
 
                 // Send up to 1 entry, constrained by the end of the log.
-                let last_entry = cmp::min(self.log.len(), next_index);
+                let last_entry = cmp::min(self.current_index(), next_index);
                 // TODO: determine if `sub_seq` is really necessary here,
                 // assuming that `next_index` and `last_entry` have sane
                 // values.
                 // It should be possible to do this with simple slicing.
-                let entries = sub_seq(&self.log, next_index, last_entry).to_vec();
+                let entries = sub_seq(&self.log.inner, next_index, last_entry).to_vec();
 
                 return Ok(MessageAppendEntries {
                     term: self.current_term,
@@ -614,7 +683,7 @@ impl RaftServer {
         }
 
         self.state = RaftState::Leader(LeaderState::new(
-            self.node_ids().iter().cloned().map(|s| (s, self.log.len() + 1)).collect(),
+            self.node_ids().iter().cloned().map(|s| (s, self.current_index() + 1)).collect(),
             self.node_ids().iter().cloned().map(|s| (s, 0)).collect(),
         ));
         self.election_timer = 0;
@@ -638,8 +707,8 @@ impl RaftServer {
             return Err(ClientRequestError::NotLeader);
         }
 
-        let entry = LogEntry(v, self.current_term);
-        self.log.push(entry);
+        let entry = LogEntry::new(v, self.current_term);
+        self.log.append(entry);
 
         Ok(())
     }
@@ -671,7 +740,7 @@ impl RaftServer {
                 _ => unreachable!(),
             };
 
-            let agree_indices = (1..self.log.len() + 1)
+            let agree_indices = (1..self.current_index() + 1)
                 .filter(|&idx| {
                     let agree_servers = match_index_iter
                         .clone()
@@ -681,7 +750,7 @@ impl RaftServer {
                     is_quorum(&agree_servers, &self.node_ids())
                 });
             if let Some(max_agree_index) = agree_indices.max() {
-                let term = match self.log.get(max_agree_index - 1) {
+                let term = match self.log.get(max_agree_index) {
                     Some(entry) => entry.term(),
                     None => panic!("Missing log entry"),
                 };
@@ -721,6 +790,7 @@ impl RaftServer {
     ///
     /// Panics if any invariants are violated.
     // TODO: ensure that only `msg.entries` of length `0` or `1` are handled.
+    // FIXME: update commit index in here.
     pub fn handle_append_entries_request(&mut self, peer: &Id, msg: &MessageAppendEntries) -> MessageAppendEntriesResponse {
         // If the node is ahead of us, update our term.
         if msg.term > self.current_term {
@@ -737,7 +807,7 @@ impl RaftServer {
             return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-                current_index: self.log.len(),
+                match_index: 0,
             };
         }
 
@@ -752,7 +822,7 @@ impl RaftServer {
             return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-                current_index: self.log.len(),
+                match_index: 0,
             };
             */
         }
@@ -774,15 +844,15 @@ impl RaftServer {
             if msg.prev_log_index == 0 {
                 true
             } else if msg.prev_log_index > 0 {
-                if msg.prev_log_index <= self.log.len() {
-                    let prev_log_entry = match self.log.get(msg.prev_log_index - 1) {
+                if msg.prev_log_index <= self.current_index() {
+                    let prev_log_entry = match self.log.get(msg.prev_log_index) {
                         Some(entry) => entry,
                         // TODO: this should be unreachable?
                         None => {
                             return MessageAppendEntriesResponse {
                                 term: self.current_term,
                                 success: false,
-                                current_index: self.log.len(),
+                                match_index: 0,
                             };
                         },
                     };
@@ -806,7 +876,7 @@ impl RaftServer {
             return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-                current_index: self.log.len(),
+                match_index: 0,
             };
         }
 
@@ -824,11 +894,14 @@ impl RaftServer {
             // This could make our `commit_index` decrease (e.g. if we
             // process an old, duplicated request), but that doesn't affect
             // anything.
-            self.commit_index = cmp::min(msg.leader_commit, self.log.len());
+            // FIXME: make sure the new version works correctly.
+            //self.commit_index = cmp::min(msg.leader_commit, self.current_index());
+            self.commit_index = cmp::min(msg.leader_commit, cmp::max(self.current_index(), 1));
             return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: true,
-                current_index: self.log.len(),
+                // FIXME: is this correct?
+                match_index: msg.prev_log_index + msg.entries.len(),
             };
         }
 
@@ -837,36 +910,39 @@ impl RaftServer {
         // If our log does not already contain an entry at the new index,
         // then there can be no conflict and the entry may simply be
         // appended.
-        if self.log.len() == msg.prev_log_index {
+        if self.current_index() == msg.prev_log_index {
             // TODO: find a way to take ownership of `msg` and remove this
             // `clone`.
-            self.log.push(msg.entries[0].clone());
+            self.log.append(msg.entries[0].clone());
             return MessageAppendEntriesResponse {
                 term: self.current_term,
                 success: true,
-                current_index: self.log.len(),
+                match_index: msg.prev_log_index + msg.entries.len(),
             };
         }
 
         // If our log already contains an entry at the new index, it's
         // either because: we've already appended it; or there is a
         // conflict.
-        assert!(self.log.len() >= index);
+        assert!(self.current_index() >= index);
 
         {
             // If the term of new entry and the one already in the log match,
             // that means the entry has already been appended. Otherwise,
             // there's a conflict.
-            let entry = &self.log[index - 1];
+            let entry = self.log.get(index).unwrap();
             if entry.term() == msg.entries[0].term() {
                 // This could make our `commit_index` decrease (e.g. if we
                 // process an old, duplicated request), but that doesn't affect
                 // anything.
-                self.commit_index = cmp::min(msg.leader_commit, self.log.len());
+                // FIXME: make sure the new version works correctly.
+                //self.commit_index = cmp::min(msg.leader_commit, self.current_index());
+                self.commit_index = cmp::min(msg.leader_commit, cmp::max(self.current_index(), 1));
                 return MessageAppendEntriesResponse {
                     term: self.current_term,
                     success: true,
-                    current_index: self.log.len(),
+                    // FIXME: is this correct?
+                    match_index: msg.prev_log_index + msg.entries.len(),
                 };
             }
 
@@ -874,13 +950,13 @@ impl RaftServer {
         }
 
         // When there's a conflict, we simply remove the last item in the log.
-        let conflict_index = self.log.len();
+        let conflict_index = self.current_index();
         self.log.remove(conflict_index - 1);
 
         MessageAppendEntriesResponse {
             term: self.current_term,
             success: true,
-            current_index: self.log.len(),
+            match_index: msg.prev_log_index + msg.entries.len(),
         }
     }
 
@@ -894,6 +970,7 @@ impl RaftServer {
     /// specified peer.
     /// Panics if the server's state does not have a `match_index` entry for the
     /// specified peer.
+    // FIXME: update commit index in here
     pub fn handle_append_entries_response(&mut self, peer: &Id, msg: &MessageAppendEntriesResponse) -> Result<(), RaftServerError> {
         assert!(self.is_leader());
 
@@ -916,43 +993,30 @@ impl RaftServer {
         // `current_term`.
         assert!(msg.term == self.current_term);
 
-        match self.state {
-            RaftState::Leader(ref mut state) => {
-                match state.next_index(peer) {
-                    Some(next_index) => {
-                        // `match_index` only needs to be modified if the
-                        // RPC call was successful; otherwise, we retry the RPC.
-                        if msg.success {
-                            // FIXME: make sure this works
-                            //state.set_next_index(*peer, next_index + 1);
-                            state.set_next_index(*peer, msg.current_index + 1);
+        {
+            let current_index = self.current_index();
 
-                            match state.match_index.get_mut(peer) {
-                                Some(match_index) => {
-                                    // FIXME: make sure this works.
-                                    //*match_index = *match_index + 1;
-                                    *match_index = msg.current_index + 1;
-                                },
-                                None => panic!("Leader state missing match_index for peer {}", peer),
-                            };
+            let state;
+            if let RaftState::Leader(ref mut leader_state) = self.state {
+                state = leader_state;
+            } else {
+                panic!("Non-leader node handling AppendEntries response");
+            }
+            let next_index = state.next_index(peer)
+                .unwrap_or_else(|| panic!("Leader state missing next_index for peer {}", peer));
+            let match_index = state.match_index(peer)
+                .unwrap_or_else(|| panic!("Leader state missing match_index for peer {}", peer));
 
-                            return Ok(());
-                        } else {
-                            // FIXME: make sure this works & get rid of the
-                            // unwrap below.
-                            //state.set_next_index(*peer, cmp::max(next_index - 1, 1));
-                            if msg.current_index < *state.match_index.get(peer).unwrap() {}
-                            else if msg.current_index < next_index - 1 {
-                                state.set_next_index(*peer, cmp::min(msg.current_index + 1, self.log.len()));
-                            } else {
-                                state.set_next_index(*peer, next_index - 1);
-                            }
-                        }
-                    },
-                    None => panic!("Leader state missing next_index for peer {}", peer),
-                };
-            },
-            _ => panic!("Non-leader node handling AppendEntries response"),
+            // `match_index` only needs to be modified if the
+            // RPC call was successful; otherwise, we retry the RPC.
+            if msg.success {
+                state.set_next_index(*peer, msg.match_index + 1);
+                state.set_match_index(*peer, msg.match_index);
+
+                return Ok(());
+            } else {
+                state.set_next_index(*peer, cmp::max(next_index - 1, 1));
+            }
         }
 
         // FIXME: we're retrying when we shouldn't be for some reason
@@ -1011,14 +1075,14 @@ impl RaftServer {
         // 1. has the later term, if the last entries in the logs have different
         //    terms; otherwise,
         // 2. whichever log is longer is more up-to-date.
-        match msg.last_log_term.cmp(&last_term(&self.log)) {
+        match msg.last_log_term.cmp(&self.log.last_term()) {
             Ordering::Less => {
                 return MessageRequestVoteResponse {
                     term: self.current_term,
                     vote_granted: false,
                 };
             },
-            Ordering::Equal => if msg.last_log_index < self.log.len() {
+            Ordering::Equal => if msg.last_log_index < self.current_index() {
                 return MessageRequestVoteResponse {
                     term: self.current_term,
                     vote_granted: false,
@@ -1110,8 +1174,8 @@ impl RaftServer {
                 // respond after entry applied to state machine (§5.3).
 
                 // TODO
-                // If last log index >= nextIndex for a follower: send
-                // AppendEntries RPC with log entries starting at nextIndex
+                // If last log index >= next_index for a follower: send
+                // AppendEntries RPC with log entries starting at next_index
                 // (§5.3).
 
                 // TODO
@@ -1240,9 +1304,51 @@ impl RaftServer {
     }
 }
 
-/// Initializes a new, empty, replicated log.
-fn log_new() -> Log {
-    Vec::new()
+/// Log to replicate across servers.
+#[derive(Clone, Debug, PartialEq)]
+struct Log {
+    inner: Vec<LogEntry>,
+}
+
+impl Log {
+    /// Initializes a new, replicated log.
+    fn new(vec: Vec<LogEntry>) -> Self {
+        Self { inner: vec }
+    }
+
+    /// Returns the entry at the requested log index.
+    fn get(&self, idx: usize) -> Option<&LogEntry> {
+        self.inner.get(idx - 1)
+    }
+
+    /// Appends an entry to the log.
+    fn append(&mut self, entry: LogEntry) {
+        self.inner.push(entry)
+    }
+
+    /// Removes an entry from the log at the specified index.
+    fn remove(&mut self, idx: usize) {
+        self.inner.remove(idx - 1);
+    }
+
+    /// The term of the last entry in a log, or 0 if the log is empty.
+    fn last_term(&self) -> usize {
+        match self.inner.len() {
+            0 => 0,
+            x => self.get(x).unwrap().term()
+        }
+    }
+
+    /// Return the number of entries in the log.
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 /// Returns true if a subset of a set constitutes a quorum (i.e., a majority).
@@ -1255,14 +1361,6 @@ fn is_quorum<T>(subset: &HashSet<T>, set: &HashSet<T>) -> bool
 {
     assert!(subset.is_subset(set));
     subset.len() * 2 > set.len()
-}
-
-/// The term of the last entry in a log, or 0 if the log is empty.
-fn last_term(log: &Log) -> usize {
-    match log.len() {
-        0 => 0,
-        x => log[x - 1].term()
-    }
 }
 
 /// Returns the sequence <<s[m], s[m+1], ..., s[n]>>.
@@ -1445,7 +1543,7 @@ mod tests {
         }
         raft.current_term = 1;
         raft.voted_for = Some(3);
-        raft.log.append(&mut vec![LogEntry((), 1)]);
+        raft.log = Log::new(vec![LogEntry::new((), 1)]);
         raft.state = RaftState::Candidate(CandidateState::default());
         raft.commit_index = 2;
 
@@ -1453,7 +1551,7 @@ mod tests {
         assert_eq!(raft.node.id, 1);
         assert_eq!(raft.current_term, 1);
         assert_eq!(raft.voted_for, Some(3));
-        assert_eq!(raft.log, vec![LogEntry((), 1)]);
+        assert_eq!(raft.log, Log::new(vec![LogEntry::new((), 1)]));
         assert_eq!(raft.state, RaftState::Follower);
         assert_eq!(raft.commit_index, 0);
     }
@@ -1487,10 +1585,10 @@ mod tests {
     fn test_raft_server_request_vote() {
         let mut raft = init_single_server();
         raft.current_term = 5;
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 1),
-            LogEntry((), 4),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 1),
+            LogEntry::new((), 4),
         ]);
         raft.state = RaftState::Candidate(CandidateState::default());
 
@@ -1527,9 +1625,9 @@ mod tests {
         let servers: HashSet<Id> = [0, 1].iter().cloned().collect();
         let mut raft = RaftServer::new(0);
         raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
         ]);
         raft.current_term = 5;
         raft.state = RaftState::Leader(LeaderState::new(
@@ -1564,8 +1662,8 @@ mod tests {
         let servers: HashSet<Id> = [0, 1].iter().cloned().collect();
         let mut raft = RaftServer::new(0);
         raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
         ]);
         raft.current_term = 5;
         raft.state = RaftState::Leader(LeaderState::new(
@@ -1599,10 +1697,10 @@ mod tests {
     #[test]
     fn test_raft_server_append_entries_heartbeat() {
         let mut raft = init_single_server();
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 4),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 4),
         ]);
         raft.current_term = 5;
         raft.state = RaftState::Leader(LeaderState::new(
@@ -1673,10 +1771,10 @@ mod tests {
             votes_responded: [0, 1, 2, 3].iter().cloned().collect(),
             votes_granted: [0, 1, 2].iter().cloned().collect(),
         });
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
         ]);
 
         SENT_MESSAGES.with(|messages| assert_eq!(messages.borrow().len(), 0));
@@ -1717,7 +1815,7 @@ mod tests {
         raft.state = RaftState::Leader(LeaderState::default());
 
         assert_eq!(raft.client_request(()), Ok(()));
-        assert_eq!(raft.log, vec![LogEntry((), 3)]);
+        assert_eq!(raft.log, Log::new(vec![LogEntry::new((), 3)]));
     }
 
     #[test]
@@ -1739,12 +1837,12 @@ mod tests {
         }
         raft.commit_index = 1;
         raft.current_term = 3;
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 4),
-            LogEntry((), 5),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 4),
+            LogEntry::new((), 5),
         ]);
         raft.state = RaftState::Leader(LeaderState::new(
             HashMap::new(),
@@ -1765,12 +1863,12 @@ mod tests {
         // Majority of servers agree on index 3, but `log[3].term !=
         // self.current_term`.
         raft.current_term = 2;
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 4),
-            LogEntry((), 5),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 4),
+            LogEntry::new((), 5),
         ]);
         raft.state = RaftState::Leader(LeaderState::new(
             HashMap::new(),
@@ -1855,7 +1953,7 @@ mod tests {
         // `log` does not contain an entry at `prev_log_index` whose term
         // matches `prev_log_term`
         // TODO: add these entries via an RPC call instead.
-        raft.log.push(LogEntry((), 3));
+        raft.log.append(LogEntry::new((), 3));
         let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, false);
@@ -1870,7 +1968,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 2,
             prev_log_term: 2,
-            entries: vec![LogEntry((), 4)],
+            entries: vec![LogEntry::new((), 4)],
             leader_commit: 0,
         };
 
@@ -1878,11 +1976,11 @@ mod tests {
 
         // Existing entry conflicts with a new one.
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 3),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 3),
         ]);
         raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae);
@@ -1891,11 +1989,11 @@ mod tests {
         // be removed eventually, each conflicting AppendEntries RPC call will
         // only remove one entry at a time.
         assert_eq!(aer.success, true);
-        assert_eq!(raft.log, vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
-        ]);
+        assert_eq!(raft.log, Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+        ]));
     }
 
     // New entry is already appended.
@@ -1906,26 +2004,26 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
+            entries: vec![LogEntry::new((), 2), LogEntry::new((), 3), LogEntry::new((), 4)],
             leader_commit: 0,
         };
 
         let mut raft = init_single_server();
 
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
         ]);
         raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
-        assert_eq!(raft.log, vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-        ]);
+        assert_eq!(raft.log, Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+        ]));
     }
 
     // Append any new entries not already in the log.
@@ -1936,25 +2034,25 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![LogEntry((), 2), LogEntry((), 3), LogEntry((), 4)],
+            entries: vec![LogEntry::new((), 2), LogEntry::new((), 3), LogEntry::new((), 4)],
             leader_commit: 0,
         };
 
         let mut raft = init_single_server();
 
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
         ]);
         raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
-        assert_eq!(raft.log, vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-        ]);
+        assert_eq!(raft.log, Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+        ]));
     }
 
     // If `leader_commit` > `commit_index`, set `commit_index =
@@ -1967,10 +2065,10 @@ mod tests {
             prev_log_index: 1,
             prev_log_term: 1,
             entries: vec![
-                LogEntry((), 2),
-                LogEntry((), 4),
-                LogEntry((), 4),
-                LogEntry((), 4),
+                LogEntry::new((), 2),
+                LogEntry::new((), 4),
+                LogEntry::new((), 4),
+                LogEntry::new((), 4),
             ],
             leader_commit: 3,
         };
@@ -1981,11 +2079,11 @@ mod tests {
         // `leader_commit` is greater than `commit_index`, and less than index
         // of last new entry
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 3),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 3),
         ]);
         raft.set_commit_index(2);
         raft.handle_append_entries_request(&1, &ae);
@@ -2011,7 +2109,7 @@ mod tests {
         let aer = MessageAppendEntriesResponse {
             term: 1,
             success: true,
-            current_index: 0,
+            match_index: 0,
         };
 
         // `current_term` is not equal to `term`
@@ -2024,13 +2122,13 @@ mod tests {
     fn test_raft_server_handle_append_entries_response_success() {
         let mut raft = init_single_server();
         raft.set_current_term(1);
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 3),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 3),
         ]);
         // NOTE: we're assuming here that there are 3 Raft peers: 0
         // (this server), 1 (the one sending the response), and 2.
@@ -2039,16 +2137,54 @@ mod tests {
             [(1, 0), (2, 0)].iter().cloned().collect(),
         ));
 
+        /*
+        let ae = MessageAppendEntries {
+            entries: vec![],
+            leader_commit
+        };
+        */
+        raft.register_callbacks(MOCK_CALLBACKS, ptr::null_mut());
+        let mut srv = init_single_server();
+        srv.set_current_term(1);
+        srv.node.id = 1;
+        let ae = raft.append_entries(&1).unwrap();
+        println!("{:?}", ae);
+        let aer = srv.handle_append_entries_request(&0, &ae);
+        println!("{:?}", aer);
+        raft.handle_append_entries_response(&1, &aer).unwrap();
+        SENT_MESSAGES.with(|messages| {
+            println!("msg: {:?}", (*messages.borrow())[0]);
+            let messages = &*messages.borrow();
+            let msg_raw = match messages[0].1 {
+                Message::AppendEntries(ref msg) => msg,
+                _ => unreachable!(),
+            };
+            let msg: MessageAppendEntries = (*msg_raw).clone().into();
+            println!("msg: {:?}", msg);
+        });
+        let aer = srv.handle_append_entries_request(&0, &MessageAppendEntries {
+            term: 1,
+            leader_id: 0,
+            prev_log_index: 5,
+            prev_log_term: 3,
+            entries: vec![],
+            leader_commit: 0,
+        });
+        panic!();
+        /*
         let aer = MessageAppendEntriesResponse {
             term: 1,
             success: true,
-            current_index: 0,
+            match_index: 4,
         };
         raft.handle_append_entries_response(&1, &aer).unwrap();
         assert_eq!(raft.state, RaftState::Leader(LeaderState::new(
             [(1, 8), (2, 7)].iter().cloned().collect(),
             [(1, 1), (2, 0)].iter().cloned().collect(),
+            //[(1, 1), (2, 7)].iter().cloned().collect(),
+            //[(1, 0), (2, 0)].iter().cloned().collect(),
         )));
+        */
     }
 
     #[test]
@@ -2056,13 +2192,13 @@ mod tests {
         let mut raft = init_single_server();
         raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
         raft.set_current_term(1);
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 3),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 3),
         ]);
         // NOTE: we're assuming here that there are 3 Raft peers: 0
         // (this server), 1 (the one sending the response), and 2.
@@ -2074,7 +2210,7 @@ mod tests {
         let aer = MessageAppendEntriesResponse {
             term: 1,
             success: false,
-            current_index: 0,
+            match_index: 0,
         };
         raft.handle_append_entries_response(&1, &aer).unwrap();
         assert_eq!(raft.state, RaftState::Leader(LeaderState::new(
@@ -2146,10 +2282,10 @@ mod tests {
         // candidate's log is not as up-to-date as the receiver's log as the
         // last entry in the receiver's log has a later term.
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 4),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 4),
         ]);
         let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
@@ -2159,12 +2295,12 @@ mod tests {
         // candidate's log is not as up-to-date as the receiver's log as the
         // receiver's log is longer.
         // TODO: add these entries via an RPC call instead.
-        raft.log = vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
-            LogEntry((), 3),
-            LogEntry((), 4),
-        ];
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
+            LogEntry::new((), 3),
+            LogEntry::new((), 4),
+        ]);
         let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
         assert_eq!(rvr.vote_granted, false);
@@ -2185,9 +2321,9 @@ mod tests {
         // TODO: replace this with a call to `update_term`.
         raft.current_term = 1;
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(&mut vec![
-            LogEntry((), 1),
-            LogEntry((), 2),
+        raft.log = Log::new(vec![
+            LogEntry::new((), 1),
+            LogEntry::new((), 2),
         ]);
         let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
@@ -2395,8 +2531,8 @@ mod tests {
 
     #[test]
     fn test_last_term() {
-        assert_eq!(last_term(&Vec::new()), 0);
-        assert_eq!(last_term(&vec![LogEntry((), 0), LogEntry((), 1)]), 1);
+        assert_eq!(Log::default().last_term(), 0);
+        assert_eq!(Log::new(vec![LogEntry::new((), 0), LogEntry::new((), 1)]).last_term(), 1);
     }
 
     #[test]
