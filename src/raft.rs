@@ -1,14 +1,12 @@
 #![allow(dead_code, unused_variables)]
 
-use libc::{c_void, size_t, uint32_t};
+use libc::c_void;
 use rand::{self, Rng};
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::mem;
 use std::ptr;
-use std::slice;
-use utils::CVec;
+use utils::Array;
 
 // Randomized election timeout range, in milliseconds.
 const ELECTION_TIMEOUT_RANGE: (usize, usize) = (150, 300);
@@ -43,57 +41,6 @@ impl LogEntry {
     }
 }
 
-// FIXME: get rid of this
-/*
-#[repr(C)]
-pub struct Tuple {
-    a: uint32_t,
-    b: uint32_t,
-}
-*/
-
-#[repr(C)]
-pub struct Array {
-    data: *const c_void,
-    len: size_t,
-}
-
-impl Array {
-    unsafe fn as_u32_slice(&self) -> &[u32] {
-        assert!(!self.data.is_null());
-        slice::from_raw_parts(self.data as *const u32, self.len as usize)
-    }
-
-    fn from_vec<T>(mut vec: Vec<T>) -> Array {
-        // Important to make length and capacity match.
-        // A better solution is to track both length and capacity.
-        vec.shrink_to_fit();
-
-        let array = Array { data: vec.as_ptr() as *const c_void, len: vec.len() as size_t };
-
-        // Leak the memory, and now the raw pointer (and eventually C) is the
-        // owner.
-        mem::forget(vec);
-
-        array
-    }
-}
-
-/*
-#[no_mangle]
-pub extern "C" fn convert_vec(a: Array, b: Array) -> Array {
-    let a = unsafe { a.as_u32_slice() };
-    let b = unsafe { b.as_u32_slice() };
-
-    let vec =
-        a.iter().zip(b.iter())
-        .map(|(&a, &b)| Tuple { a, b })
-        .collect();
-
-    Array::from_vec(vec)
-}
-*/
-
 /// Message invoked by leader to replicate log entries (§5.3); also used as
 /// heartbeat (§5.2).
 #[derive(Clone, Debug, PartialEq)]
@@ -116,12 +63,18 @@ pub struct MessageAppendEntries {
 
 impl From<MessageAppendEntriesRaw> for MessageAppendEntries {
     fn from(msg: MessageAppendEntriesRaw) -> Self {
+        /*
+        let len = msg.entries_len as usize;
+        let vec = unsafe { Vec::from_raw_parts(msg.entries_ptr, len, len) };
+        */
+
         Self {
             term: msg.term,
             leader_id: msg.leader_id,
             prev_log_index: msg.prev_log_index,
             prev_log_term: msg.prev_log_term,
-            entries: (*CVec::new(msg.entries_ptr, msg.entries_num)).to_vec(),
+            entries: Array::to_vec(msg.entries),
+            //entries: (*CVec::new(msg.entries_ptr, msg.entries_num)).to_vec(),
             leader_commit: msg.leader_commit,
         }
     }
@@ -134,20 +87,34 @@ pub struct MessageAppendEntriesRaw {
     pub leader_id: Id,
     pub prev_log_index: usize,
     pub prev_log_term: Term,
-    pub entries_num: usize,
-    pub entries_ptr: *const LogEntry,
+    pub entries: Array<LogEntry>,
+    /*
+    pub entries_ptr: *mut LogEntry,
+    pub entries_len: size_t,
+    */
     pub leader_commit: usize,
 }
 
 impl From<MessageAppendEntries> for MessageAppendEntriesRaw {
     fn from(msg: MessageAppendEntries) -> Self {
+        /*
+        let mut vec = msg.entries;
+        vec.shrink_to_fit();
+        assert!(vec.len() == vec.capacity());
+        let ptr = vec.as_mut_ptr();
+        let len = vec.len();
+        */
+
         Self {
             term: msg.term,
             leader_id: msg.leader_id,
             prev_log_index: msg.prev_log_index,
             prev_log_term: msg.prev_log_term,
-            entries_num: msg.entries.len(),
-            entries_ptr: msg.entries.as_ptr(),
+            entries: Array::from_vec(msg.entries),
+            /*
+            entries_ptr: ptr,
+            entries_len: len,
+            */
             leader_commit: msg.leader_commit,
         }
     }
@@ -2137,54 +2104,30 @@ mod tests {
             [(1, 0), (2, 0)].iter().cloned().collect(),
         ));
 
-        /*
-        let ae = MessageAppendEntries {
-            entries: vec![],
-            leader_commit
-        };
-        */
         raft.register_callbacks(MOCK_CALLBACKS, ptr::null_mut());
-        let mut srv = init_single_server();
-        srv.set_current_term(1);
-        srv.node.id = 1;
-        let ae = raft.append_entries(&1).unwrap();
-        println!("{:?}", ae);
-        let aer = srv.handle_append_entries_request(&0, &ae);
-        println!("{:?}", aer);
-        raft.handle_append_entries_response(&1, &aer).unwrap();
-        SENT_MESSAGES.with(|messages| {
-            println!("msg: {:?}", (*messages.borrow())[0]);
-            let messages = &*messages.borrow();
-            let msg_raw = match messages[0].1 {
-                Message::AppendEntries(ref msg) => msg,
-                _ => unreachable!(),
-            };
-            let msg: MessageAppendEntries = (*msg_raw).clone().into();
-            println!("msg: {:?}", msg);
-        });
-        let aer = srv.handle_append_entries_request(&0, &MessageAppendEntries {
+        let mut peer = init_single_server();
+        peer.set_current_term(1);
+        peer.node.id = 1;
+
+        let ae = MessageAppendEntries {
             term: 1,
             leader_id: 0,
-            prev_log_index: 5,
-            prev_log_term: 3,
-            entries: vec![],
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![LogEntry::new((), 1)],
             leader_commit: 0,
-        });
-        panic!();
-        /*
-        let aer = MessageAppendEntriesResponse {
+        };
+        let aer = peer.handle_append_entries_request(&0, &ae);
+        assert_eq!(aer, MessageAppendEntriesResponse {
             term: 1,
             success: true,
-            match_index: 4,
-        };
+            match_index: 1,
+        });
         raft.handle_append_entries_response(&1, &aer).unwrap();
         assert_eq!(raft.state, RaftState::Leader(LeaderState::new(
-            [(1, 8), (2, 7)].iter().cloned().collect(),
+            [(1, 2), (2, 7)].iter().cloned().collect(),
             [(1, 1), (2, 0)].iter().cloned().collect(),
-            //[(1, 1), (2, 7)].iter().cloned().collect(),
-            //[(1, 0), (2, 0)].iter().cloned().collect(),
         )));
-        */
     }
 
     #[test]
