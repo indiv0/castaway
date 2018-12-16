@@ -1,10 +1,10 @@
 // Set high recursion limit as `error_chain!` can recurse deeply.
 #![recursion_limit = "1024"]
 
-extern crate chrono;
+//extern crate chrono;
 #[macro_use]
 extern crate error_chain;
-extern crate fern;
+//extern crate fern;
 extern crate libc;
 #[macro_use]
 extern crate log;

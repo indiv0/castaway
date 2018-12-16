@@ -18,7 +18,7 @@ const HEARTBEAT_INTERVAL: usize = ELECTION_TIMEOUT_RANGE.0 / 2;
 pub type UserData = *mut c_void;
 
 pub type Id = usize;
-type Command = ();
+pub type Command = usize;
 pub type Term = usize;
 /// An individual log entry.
 ///
@@ -277,7 +277,7 @@ pub enum AppendEntriesError {
 /// Errors which may occur when receiving a client request to add a value to the
 /// log.
 #[derive(Clone, Debug, PartialEq)]
-enum ClientRequestError {
+pub enum ClientRequestError {
     /// A non-leader node received a client request.
     NotLeader,
 }
@@ -295,12 +295,20 @@ pub enum RaftServerError {
     /// A required callback function was unregistered.
     UnregisteredCallbackFn,
     /// An error occurred while constructing an AppendEntries RPC request.
-    AppendEntriesError(AppendEntriesError),
+    AppendEntries(AppendEntriesError),
+    /// An error occurred while handling a client request.
+    ClientRequest(ClientRequestError)
 }
 
 impl From<AppendEntriesError> for RaftServerError {
     fn from(error: AppendEntriesError) -> Self {
-        RaftServerError::AppendEntriesError(error)
+        RaftServerError::AppendEntries(error)
+    }
+}
+
+impl From<ClientRequestError> for RaftServerError {
+    fn from(error: ClientRequestError) -> Self {
+        RaftServerError::ClientRequest(error)
     }
 }
 
@@ -366,7 +374,7 @@ pub struct RaftServer {
     /// `None` if server hasn't voted.
     voted_for: Option<Id>,
     /// Replicated log.
-    log: Log,
+    pub log: Log,
     /// Index of highest log entry known to be committed.
     ///
     /// Initialized to 0, increases monotonically.
@@ -433,7 +441,8 @@ impl RaftServer {
     }
 
     fn set_voted_for(&mut self, id: Option<Id>) {
-        println!("RAFT: server {} voted for: {:?}", self.id(), id);
+        // TODO: remove this
+        //println!("RAFT: server {} voted for: {:?}", self.id(), id);
         self.voted_for = id;
     }
 
@@ -445,7 +454,7 @@ impl RaftServer {
         self.state = state;
     }
 
-    fn current_index(&self) -> usize {
+    pub fn current_index(&self) -> usize {
         self.log.len()
     }
 
@@ -660,7 +669,8 @@ impl RaftServer {
         // each server; repeat during idle periods to prevent election timeouts
         // (§5.2).
         assert!(self.is_leader());
-        println!("RAFT: server {} became leader", self.id());
+        // TODO: remove this
+        //println!("RAFT: server {} became leader", self.id());
         for id in self.peer_ids() {
             self.send_append_entries(id)?;
         }
@@ -669,15 +679,40 @@ impl RaftServer {
     }
 
     /// Leader receives a client request to add `v` to the log.
-    fn client_request(&mut self, v: Command) -> Result<(), ClientRequestError> {
+    ///
+    /// Returns the index and term of the entry, if successful.
+    pub fn client_request(&mut self, v: Command) -> Result<(usize, Term), RaftServerError> {
         if !self.is_leader() {
-            return Err(ClientRequestError::NotLeader);
+            return Err(ClientRequestError::NotLeader).map_err(|e| e.into());
         }
 
         let entry = LogEntry::new(v, self.current_term);
         self.log.append(entry);
 
-        Ok(())
+        // Send the new entry to any peers who are not behind.
+        let peer_ids = self.peer_ids();
+        let current_index = self.current_index();
+        {
+            let peers_to_update: Vec<&Id>;
+            if let RaftState::Leader(ref mut leader_state) = self.state {
+                peers_to_update = peer_ids.iter()
+                    .filter(|id| leader_state.next_index(&id).unwrap() == current_index)
+                    .collect();
+            } else {
+                unreachable!();
+            }
+            for id in peers_to_update {
+                self.send_append_entries(*id)?;
+            }
+        }
+
+        // If we're the only node, we don't need to wait for the entry to be
+        // considered committed.
+        if self.peer_ids().len() == 0 {
+            self.commit_index = self.current_index();
+        }
+
+        Ok((self.current_index(), self.current_term))
     }
 
     /// Leader advances its `commit_index`.
@@ -797,7 +832,8 @@ impl RaftServer {
         // Since we received a valid AppendEntries RPC request, we ensure that
         // the sender is considered our leader, and reset the election timeout.
         self.leader_node = Some(*peer);
-        println!("RAFT: server {} confirmed {} as leader", self.id(), peer);
+        // TODO: remove this
+        //println!("RAFT: server {} confirmed {} as leader", self.id(), peer);
         self.election_timer = 0;
 
         // If we're not a candidate, we must be a follower as leaders ignore
@@ -986,8 +1022,8 @@ impl RaftServer {
             }
         }
 
-        // FIXME: we're retrying when we shouldn't be for some reason
-        println!("RAFT: retrying append entries");
+        // TODO: remove this
+        //println!("RAFT: retrying append entries");
         self.send_append_entries(*peer)
     }
 
@@ -1123,13 +1159,15 @@ impl RaftServer {
             // viable leader and begins an election to choose a new leader.
             RaftState::Follower => {
                 if self.is_election_timeout_elapsed() && self.voted_for().is_none() {
-                    println!("RAFT: server {} becoming candidate", self.id());
+                    // TODO: remove this
+                    //println!("RAFT: server {} becoming candidate", self.id());
                     self.become_candidate()?;
                 }
             },
             RaftState::Candidate(_) => {
                 if self.is_election_timeout_elapsed() {
-                    println!("RAFT: server {} starting new election", self.id());
+                    // TODO: remove this
+                    //println!("RAFT: server {} starting new election", self.id());
                     self.start_election()?;
                 } else {
                     self.try_become_leader()?;
@@ -1273,8 +1311,8 @@ impl RaftServer {
 
 /// Log to replicate across servers.
 #[derive(Clone, Debug, PartialEq)]
-struct Log {
-    inner: Vec<LogEntry>,
+pub struct Log {
+    pub inner: Vec<LogEntry>,
 }
 
 impl Log {
@@ -1510,7 +1548,7 @@ mod tests {
         }
         raft.current_term = 1;
         raft.voted_for = Some(3);
-        raft.log = Log::new(vec![LogEntry::new((), 1)]);
+        raft.log = Log::new(vec![LogEntry::new(42, 1)]);
         raft.state = RaftState::Candidate(CandidateState::default());
         raft.commit_index = 2;
 
@@ -1518,7 +1556,7 @@ mod tests {
         assert_eq!(raft.node.id, 1);
         assert_eq!(raft.current_term, 1);
         assert_eq!(raft.voted_for, Some(3));
-        assert_eq!(raft.log, Log::new(vec![LogEntry::new((), 1)]));
+        assert_eq!(raft.log, Log::new(vec![LogEntry::new(42, 1)]));
         assert_eq!(raft.state, RaftState::Follower);
         assert_eq!(raft.commit_index, 0);
     }
@@ -1553,9 +1591,9 @@ mod tests {
         let mut raft = init_single_server();
         raft.current_term = 5;
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 1),
-            LogEntry::new((), 4),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 4),
         ]);
         raft.state = RaftState::Candidate(CandidateState::default());
 
@@ -1593,8 +1631,8 @@ mod tests {
         let mut raft = RaftServer::new(0);
         raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
         ]);
         raft.current_term = 5;
         raft.state = RaftState::Leader(LeaderState::new(
@@ -1630,7 +1668,7 @@ mod tests {
         let mut raft = RaftServer::new(0);
         raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
+            LogEntry::new(42, 1),
         ]);
         raft.current_term = 5;
         raft.state = RaftState::Leader(LeaderState::new(
@@ -1665,9 +1703,9 @@ mod tests {
     fn test_raft_server_append_entries_heartbeat() {
         let mut raft = init_single_server();
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 4),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 4),
         ]);
         raft.current_term = 5;
         raft.state = RaftState::Leader(LeaderState::new(
@@ -1739,9 +1777,9 @@ mod tests {
             votes_granted: [0, 1, 2].iter().cloned().collect(),
         });
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
         ]);
 
         SENT_MESSAGES.with(|messages| assert_eq!(messages.borrow().len(), 0));
@@ -1781,8 +1819,8 @@ mod tests {
         raft.current_term = 3;
         raft.state = RaftState::Leader(LeaderState::default());
 
-        assert_eq!(raft.client_request(()), Ok(()));
-        assert_eq!(raft.log, Log::new(vec![LogEntry::new((), 3)]));
+        assert_eq!(raft.client_request(42), Ok((1, 3)));
+        assert_eq!(raft.log, Log::new(vec![LogEntry::new(42, 3)]));
     }
 
     #[test]
@@ -1791,7 +1829,7 @@ mod tests {
 
         // `state` is `Follower`
         raft.state = RaftState::Follower;
-        assert_eq!(raft.client_request(()), Err(ClientRequestError::NotLeader));
+        assert_eq!(raft.client_request(42), Err(RaftServerError::ClientRequest(ClientRequestError::NotLeader)));
     }
 
     /* `RaftServer::advance_commit_index` tests */
@@ -1805,11 +1843,11 @@ mod tests {
         raft.commit_index = 1;
         raft.current_term = 3;
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 4),
-            LogEntry::new((), 5),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 4),
+            LogEntry::new(42, 5),
         ]);
         raft.state = RaftState::Leader(LeaderState::new(
             HashMap::new(),
@@ -1831,11 +1869,11 @@ mod tests {
         // self.current_term`.
         raft.current_term = 2;
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 4),
-            LogEntry::new((), 5),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 4),
+            LogEntry::new(42, 5),
         ]);
         raft.state = RaftState::Leader(LeaderState::new(
             HashMap::new(),
@@ -1920,7 +1958,7 @@ mod tests {
         // `log` does not contain an entry at `prev_log_index` whose term
         // matches `prev_log_term`
         // TODO: add these entries via an RPC call instead.
-        raft.log.append(LogEntry::new((), 3));
+        raft.log.append(LogEntry::new(42, 3));
         let aer = raft.handle_append_entries_request(&1, &ae);
 
         assert_eq!(aer.success, false);
@@ -1935,7 +1973,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 2,
             prev_log_term: 2,
-            entries: vec![LogEntry::new((), 4)],
+            entries: vec![LogEntry::new(42, 4)],
             leader_commit: 0,
         };
 
@@ -1944,10 +1982,10 @@ mod tests {
         // Existing entry conflicts with a new one.
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 3),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 3),
         ]);
         raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae);
@@ -1957,9 +1995,9 @@ mod tests {
         // only remove one entry at a time.
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
         ]));
     }
 
@@ -1971,7 +2009,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![LogEntry::new((), 2), LogEntry::new((), 3), LogEntry::new((), 4)],
+            entries: vec![LogEntry::new(42, 2), LogEntry::new(42, 3), LogEntry::new(42, 4)],
             leader_commit: 0,
         };
 
@@ -1979,8 +2017,8 @@ mod tests {
 
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
         ]);
         raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae);
@@ -1988,8 +2026,8 @@ mod tests {
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
         ]));
     }
 
@@ -2001,7 +2039,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 1,
             prev_log_term: 1,
-            entries: vec![LogEntry::new((), 2), LogEntry::new((), 3), LogEntry::new((), 4)],
+            entries: vec![LogEntry::new(42, 2), LogEntry::new(42, 3), LogEntry::new(42, 4)],
             leader_commit: 0,
         };
 
@@ -2009,7 +2047,7 @@ mod tests {
 
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
+            LogEntry::new(42, 1),
         ]);
         raft.set_current_term(5);
         let aer = raft.handle_append_entries_request(&1, &ae);
@@ -2017,8 +2055,8 @@ mod tests {
         assert_eq!(aer.term, 5);
         assert_eq!(aer.success, true);
         assert_eq!(raft.log, Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
         ]));
     }
 
@@ -2032,10 +2070,10 @@ mod tests {
             prev_log_index: 1,
             prev_log_term: 1,
             entries: vec![
-                LogEntry::new((), 2),
-                LogEntry::new((), 4),
-                LogEntry::new((), 4),
-                LogEntry::new((), 4),
+                LogEntry::new(42, 2),
+                LogEntry::new(42, 4),
+                LogEntry::new(42, 4),
+                LogEntry::new(42, 4),
             ],
             leader_commit: 3,
         };
@@ -2047,10 +2085,10 @@ mod tests {
         // of last new entry
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 3),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 3),
         ]);
         raft.set_commit_index(2);
         raft.handle_append_entries_request(&1, &ae);
@@ -2090,12 +2128,12 @@ mod tests {
         let mut raft = init_single_server();
         raft.set_current_term(1);
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 3),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 3),
         ]);
         // NOTE: we're assuming here that there are 3 Raft peers: 0
         // (this server), 1 (the one sending the response), and 2.
@@ -2114,7 +2152,7 @@ mod tests {
             leader_id: 0,
             prev_log_index: 0,
             prev_log_term: 0,
-            entries: vec![LogEntry::new((), 1)],
+            entries: vec![LogEntry::new(42, 1)],
             leader_commit: 0,
         };
         let aer = peer.handle_append_entries_request(&0, &ae);
@@ -2136,12 +2174,12 @@ mod tests {
         raft.register_callbacks(MOCK_CALLBACKS_NOOP, ptr::null_mut());
         raft.set_current_term(1);
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 3),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 3),
         ]);
         // NOTE: we're assuming here that there are 3 Raft peers: 0
         // (this server), 1 (the one sending the response), and 2.
@@ -2226,9 +2264,9 @@ mod tests {
         // last entry in the receiver's log has a later term.
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 4),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 4),
         ]);
         let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
@@ -2239,10 +2277,10 @@ mod tests {
         // receiver's log is longer.
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
-            LogEntry::new((), 3),
-            LogEntry::new((), 4),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
+            LogEntry::new(42, 3),
+            LogEntry::new(42, 4),
         ]);
         let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
@@ -2265,8 +2303,8 @@ mod tests {
         raft.current_term = 1;
         // TODO: add these entries via an RPC call instead.
         raft.log = Log::new(vec![
-            LogEntry::new((), 1),
-            LogEntry::new((), 2),
+            LogEntry::new(42, 1),
+            LogEntry::new(42, 2),
         ]);
         let rvr = raft.handle_request_vote_request(&1, &rv);
         assert_eq!(rvr.term, 1);
@@ -2475,7 +2513,7 @@ mod tests {
     #[test]
     fn test_last_term() {
         assert_eq!(Log::default().last_term(), 0);
-        assert_eq!(Log::new(vec![LogEntry::new((), 0), LogEntry::new((), 1)]).last_term(), 1);
+        assert_eq!(Log::new(vec![LogEntry::new(42, 0), LogEntry::new(42, 1)]).last_term(), 1);
     }
 
     #[test]

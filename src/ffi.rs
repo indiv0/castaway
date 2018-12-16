@@ -1,15 +1,18 @@
 // TODO: ensure all pointers are not null.
 use errors::*;
-use libc::{c_char, c_int};
+use libc::{c_char, c_int, size_t};
 use raft::{
     Callbacks,
+    Command,
     Id,
+    LogEntry,
     MessageAppendEntriesRaw,
     MessageAppendEntriesResponse,
     MessageRequestVote,
     MessageRequestVoteResponse,
     NodeInfo,
     RaftServer,
+    Term,
     UserData,
 };
 use std::cell::RefCell;
@@ -225,4 +228,38 @@ pub extern "C" fn raft_server_handle_append_entries_response(ptr: *mut RaftServe
     let mut _raft = unsafe { &mut *ptr };
     let _msg = unsafe { &*msg };
     _raft.handle_append_entries_response(&peer, _msg).unwrap();
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_client_request(ptr: *mut RaftServer, command: Command, index: *mut *const usize, term: *mut *const Term) {
+    let mut _raft = unsafe { &mut *ptr };
+    let (entry_index, entry_term) = _raft.client_request(command).unwrap();
+    unsafe {
+        *index = &entry_index as *const usize;
+        *term = &entry_term as *const Term;
+    };
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_current_index(ptr: *mut RaftServer) -> usize {
+    let _raft = unsafe { &*ptr };
+    _raft.current_index()
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_is_leader(ptr: *mut RaftServer) -> bool {
+    let mut _raft = unsafe { &*ptr };
+    _raft.is_leader()
+}
+
+#[no_mangle]
+pub extern "C" fn raft_server_get_log(ptr: *mut RaftServer, buffer: *mut *const LogEntry, length: *mut size_t) {
+    let mut _raft = unsafe { &*ptr };
+
+    //let buffer = unsafe { slice::from_raw_parts_mut(buffer, length) };
+    unsafe {
+        *buffer = _raft.log.inner.as_ptr();
+        *length = _raft.log.inner.len() as size_t;
+        //ptr::copy_nonoverlapping(_raft.log.inner.as_ptr(), buffer.as_mut_ptr(), length);
+    }
 }

@@ -86,8 +86,8 @@ pub struct Tuple {
 #[derive(Debug, PartialEq)]
 #[repr(C)]
 pub struct Array<T> {
-    data: *mut c_void,
-    len: size_t,
+    pub data: *mut c_void,
+    pub len: size_t,
     phantom: PhantomData<T>,
 }
 

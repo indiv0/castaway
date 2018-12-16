@@ -1,10 +1,16 @@
 #import sys
 from contextlib import ExitStack
 from castaway_cffi import ffi, lib
+import random
+import datetime
 
-NUM_SERVERS = 2
-NUM_PERIODS = 100
+NUM_ELEMENTS = 10000
+NUM_SERVERS = 5
+NUM_PERIODS = 100000
 MS_PER_PERIOD = 10
+
+class ReplicationDone(Exception): pass
+
 
 class ArrayUintPtr(object):
     def __init__(self, values):
@@ -35,25 +41,25 @@ class Simulator(object):
             server.add_peer(new_server)
         self.servers.append(new_server)
         self.stack.enter_context(new_server)
-        print("CAST: Initialized server: {}".format(id))
+        #print("CAST: Initialized server: {}".format(id))
 
 
     def enqueue_message(self, message):
         self.messages.append(message)
-        print("CAST: enqueued ({}) message from {} to {}".format(
-            ffi.getctype(ffi.typeof(message.handle)),
-            message.sender.id,
-            message.recipient.id))
+        #print("CAST: enqueued ({}) message from {} to {}".format(
+        #    ffi.getctype(ffi.typeof(message.handle)),
+        #    message.sender.id,
+        #    message.recipient.id))
 
 
     def poll_message(self, message):
         msg_type = ffi.getctype(ffi.typeof(message.handle))
 
         if msg_type == "MessageRequestVote *":
-            print("CAST: polling message from {} to {}: ({})".format(
-                message.sender.id,
-                message.recipient.id,
-                ffi.getctype(ffi.typeof(message.handle))))
+            #print("CAST: polling message from {} to {}: ({})".format(
+            #    message.sender.id,
+            #    message.recipient.id,
+            #    ffi.getctype(ffi.typeof(message.handle))))
             rvr = lib.raft_server_handle_request_vote_request(
                     message.recipient.raft,
                     message.sender.id,
@@ -61,14 +67,15 @@ class Simulator(object):
             response = Message.from_raw(ffi.addressof(rvr), message.recipient, message.sender)
             self.enqueue_message(response)
         elif msg_type == "MessageRequestVoteResponse *":
-            print("CAST: polling message from {} to {}: ({})".format(
-                message.sender.id,
-                message.recipient.id,
-                ffi.getctype(ffi.typeof(message.handle))))
+            #print("CAST: polling message from {} to {}: ({})".format(
+            #    message.sender.id,
+            #    message.recipient.id,
+            #    ffi.getctype(ffi.typeof(message.handle))))
             if message.handle.vote_granted:
-                print("CAST: server {} received vote from peer {}".format(
-                    message.recipient.id,
-                    message.sender.id))
+                pass
+                #print("CAST: server {} received vote from peer {}".format(
+                #    message.recipient.id,
+                #    message.sender.id))
             lib.raft_server_handle_request_vote_response(
                     message.recipient.raft,
                     message.sender.id,
@@ -78,10 +85,10 @@ class Simulator(object):
             #    message.handle.term,
             #    message.handle.vote_granted))
         elif msg_type == "MessageAppendEntriesRaw *":
-            print("CAST: polling message from {} to {}: ({})".format(
-                message.sender.id,
-                message.recipient.id,
-                ffi.getctype(ffi.typeof(message.handle))))
+            #print("CAST: polling message from {} to {}: ({})".format(
+            #    message.sender.id,
+            #    message.recipient.id,
+            #    ffi.getctype(ffi.typeof(message.handle))))
             aer = lib.raft_server_handle_append_entries_request(
                     message.recipient.raft,
                     message.sender.id,
@@ -92,11 +99,11 @@ class Simulator(object):
                     message.sender)
             self.enqueue_message(response)
         elif msg_type == "MessageAppendEntriesResponse *":
-            print("CAST: polling message from {} to {}: ({}; success: {})".format(
-                message.sender.id,
-                message.recipient.id,
-                ffi.getctype(ffi.typeof(message.handle)),
-                message.handle.success))
+            #print("CAST: polling message from {} to {}: ({}; success: {})".format(
+            #    message.sender.id,
+            #    message.recipient.id,
+            #    ffi.getctype(ffi.typeof(message.handle)),
+            #    message.handle.success))
             lib.raft_server_handle_append_entries_response(
                     message.recipient.raft,
                     message.sender.id,
@@ -116,32 +123,39 @@ class Simulator(object):
 
     def run(self):
         with self.stack as stack:
-            #for s in self.servers:
-            #    print("CAST: server {s} voted for: {p}".format(s=s.id, p=s.voted_for()))
-            #    assert s.voted_for() is None
-
             for i in range(0, NUM_PERIODS):
-                print("CAST: --------------- running period {} ---------------------".format(self.period))
+                #print("CAST: --------------- running period {} ---------------------".format(self.period))
                 for s in self.servers:
                     s.periodic(MS_PER_PERIOD)
                 self.period += 1
                 self.poll_messages()
 
-            #for s in self.servers:
-            #    print("CAST: server {s} voted for: {p}".format(s=s.id, p=s.voted_for()))
-            #    assert s.voted_for() == s.id
+            start_time = datetime.datetime.now()
+            # Add random entries to the log
+            for server in self.servers:
+                if server.is_leader():
+                    for i in range(0, NUM_ELEMENTS):
+                        self.servers[0].client_request(i)
 
-        #for server in servers:
-        #    msg = server.outbox.pop()
-        #    if msg:
-        #        peer = msg[0]
-        #        if msg:
-        #            servers[peer].inbox.push(msg)
+            for i in range(0, NUM_PERIODS):
+                #print("CAST: --------------- running period {} ---------------------".format(self.period))
+                all_servers_replicated = True
+                for s in self.servers:
+                    s.periodic(MS_PER_PERIOD)
+                    if s.current_index() != NUM_ELEMENTS:
+                        all_servers_replicated = False
+                self.period += 1
+                self.poll_messages()
+                if all_servers_replicated:
+                    break
+            end_time = datetime.datetime.now()
 
-        #for server in servers:
-        #    msg = server.inbox.pop()
-        #    if msg:
-        #        server.receive_msg(msg[0], msg[1])
+            for s in self.servers:
+                entries = [(e.command, e.term) for e in server.get_log()]
+                print("server {} entries: {}".format(s.id, entries))
+
+            dt = end_time - start_time
+            print("elapsed time: {}".format(dt.total_seconds()))
 
 
 class Message(object):
@@ -177,42 +191,6 @@ def send_request_vote(raft, udata, peer_id, message):
     message = Message.from_raw(message, server, peer)
     server.simulator.enqueue_message(message)
 
-    #print("CAST: callback 'send_request_vote' issued to {p} from {s}".format(p=peer.id,s=server.id))
-
-    #s.outbox.push((peer, message))
-    #print(
-    #    "send_request_vote: {{peer: {p}, term: {t}, candidate_id: {c}, last_log_index: {i}, last_log_term: {l}}}".format(
-    #        p=peer,
-    #        t=message.term,
-    #        c=message.candidate_id,
-    #        i=message.last_log_index,
-    #        l=message.last_log_term))
-
-
-#class MessageRequestVote(object):
-#    def __init__(self, obj):
-#        self.__obj = obj
-
-
-#class MessageQueue(object):
-#    def __init__(self):
-#        self.__inner = []
-#
-#
-#    def push(self, item):
-#        self.__inner.append(item)
-#
-#
-#    def pop(self):
-#        if self.__inner:
-#            return self.__inner.pop(0)
-#        else:
-#            return None
-#
-#
-#    def peek(self):
-#        return self.__inner[-1]
-
 
 def verify_option(ptr, errno):
     if errno == lib.CASTAWAY_OPT_SOME:
@@ -226,9 +204,6 @@ def verify_option(ptr, errno):
 
 class RaftServer(object):
     def __init__(self, id, simulator):
-        # FIXME: remove this
-        #servers = ArrayUintPtr(servers)
-        #self.raft = lib.raft_server_new(id, servers.ptr(), servers.len())
         self.raft = lib.raft_server_new(id)
         self.id = id
         self.simulator = simulator
@@ -242,10 +217,6 @@ class RaftServer(object):
         callbacks.send_append_entries = self.send_append_entries
         lib.raft_server_register_callbacks(self.raft, callbacks, user_data)
         self._callbacks = callbacks
-
-        #self.message_queue = MessageQueue()
-        #self.inbox = MessageQueue()
-        #self.outbox = MessageQueue()
 
 
     def __enter__(self):
@@ -282,16 +253,47 @@ class RaftServer(object):
 
 
     def add_peer(self, server):
-        print("CAST: adding peer {} to server {}".format(server.id, self.id))
+        #print("CAST: adding peer {} to server {}".format(server.id, self.id))
         lib.raft_server_add_peer(self.raft, server.id, server._user_data)
-    #def receive_msg(self, peer, msg):
-    #    msg_type = ffi.getctype(ffi.typeof(msg))
 
-    #    print(msg_type)
-    #    if msg_type == "MessageRequestVote *":
-    #        #peer = ffi.new("Id *", peer)
-    #        #res = lib.raft_server_receive(self.raft, peer, msg)
-    #        pass
+
+    def is_leader(self):
+        return lib.raft_server_is_leader(self.raft)
+
+
+    def client_request(self, command):
+        if not self.is_leader():
+            return None
+
+        #print("CAST: client request with command: {}".format(command))
+        index_p = ffi.new("uintptr_t**")
+        term_p = ffi.new("Term**")
+        lib.raft_server_client_request(self.raft, command, index_p, term_p)
+        index = index_p[0][0]
+        term = term_p[0][0]
+        #print("CAST: client request successful: ({}, {})".format(index, term))
+        return (index, term)
+
+
+    def current_index(self):
+        return lib.raft_server_current_index(self.raft)
+
+
+    def get_log(self):
+        log_p = ffi.new("LogEntry**")
+        len_p = ffi.new("size_t*")
+        lib.raft_server_get_log(self.raft, log_p, len_p)
+        entries = []
+        for i in range(0, len_p[0]):
+            entry = LogEntry(log_p[0][i].command, log_p[0][i].term)
+            entries.append(entry)
+        return entries
+
+
+class LogEntry(object):
+    def __init__(self, command, term):
+        self.command = command
+        self.term = term
 
 
 #class WrapperException(Exception):
@@ -322,6 +324,7 @@ class RaftServer(object):
 #    error_msg_buf = ffi.buffer(array)
 #    message = bytes(error_msg_buf).decode("utf-8")
 #    return message
+
 
 def main():
     server_ids = list(range(0, NUM_SERVERS))

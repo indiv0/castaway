@@ -8,10 +8,10 @@ name = "castaway"
 crate-type = ["rlib", "dylib"]
 
 [dependencies]
-chrono = "0.4.6"
-env_logger = "0.4.3"
+#chrono = "0.4.6"
+#env_logger = "0.4.3"
 error-chain = "0.12.0"
-fern = "0.5.7"
+#fern = "0.5.7"
 libc = "0.2.44"
 log = "0.4.6"
 rand = "0.5.5"
